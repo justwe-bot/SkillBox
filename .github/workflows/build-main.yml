@@ -20,12 +20,18 @@ jobs:
           - name: macOS Apple Silicon
             platform: macos-latest
             args: --target aarch64-apple-darwin
+            artifact_name: skillbox-macos-aarch64
+            artifact_path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*
           - name: macOS Intel
             platform: macos-latest
             args: --target x86_64-apple-darwin
+            artifact_name: skillbox-macos-x64
+            artifact_path: src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*
           - name: Windows
             platform: windows-latest
-            args: ""
+            args: --bundles nsis
+            artifact_name: skillbox-windows-x64
+            artifact_path: src-tauri/target/release/bundle/nsis/*
 
     steps:
       - name: Checkout
@@ -57,5 +63,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           args: ${{ matrix.args }}
-          uploadWorkflowArtifacts: true
-          workflowArtifactNamePattern: skillbox-[platform]-[arch]-[bundle]
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error

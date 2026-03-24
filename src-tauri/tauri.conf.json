@@ -7,7 +7,7 @@
   },
   "package": {
     "productName": "SkillBox",
-    "version": "1.0.0"
+    "version": "2026.3.24"
   },
   "tauri": {
     "allowlist": {
@@ -20,7 +20,11 @@
       },
       "fs": {
         "all": true,
-        "scope": ["$HOME/**", "$APPDATA/**", "$APP/**"]
+        "scope": [
+          "$HOME/**",
+          "$APPDATA/**",
+          "$APP/**"
+        ]
       },
       "path": {
         "all": true

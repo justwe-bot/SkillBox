@@ -1332,10 +1332,38 @@ a {
   font-size: 0.86rem;
 }
 
+.settings-update-note {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-update-note span {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.settings-update-note p {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  color: var(--text);
+}
+
+.settings-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
 .settings-repo-button {
   width: fit-content;
   min-height: 40px;
-  margin-top: 4px;
 }
 
 .settings-footer {

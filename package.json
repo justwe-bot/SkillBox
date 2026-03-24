@@ -1,12 +1,17 @@
 {
   "name": "skillbox",
-  "version": "1.0.0",
+  "version": "2026.3.24",
   "description": "A cross-platform skill management tool",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/justwe-bot/SkillBox.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "release:version": "node scripts/set-version.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

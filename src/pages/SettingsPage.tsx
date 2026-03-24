@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { open as openDialog } from '@tauri-apps/api/dialog'
+import { open as openExternal } from '@tauri-apps/api/shell'
 import {
   ArrowLeft,
   Bell,
@@ -20,12 +21,13 @@ import {
 import { FigmaSkillIcon } from '../components/FigmaSkillIcon'
 import { Modal } from '../components/Modal'
 import { useToast } from '../components/ToastProvider'
-import { addCustomApp, getVersion, saveGitPath, scanApps } from '../lib/tauri'
+import { addCustomApp, checkUpdates, getVersion, saveGitPath, scanApps } from '../lib/tauri'
 import { loadPreferences, savePreferences } from '../lib/preferences'
 import { applyTheme, resolveAppliedTheme } from '../lib/theme'
-import type { AppPreferences, AppRecord } from '../types'
+import type { AppPreferences, AppRecord, UpdateCheckResult } from '../types'
 
 const repoUrl = 'https://github.com/justwe-bot/SkillBox'
+const releasesUrl = `${repoUrl}/releases`
 
 function getPlatformLabel() {
   const platform = `${navigator.platform ?? ''} ${navigator.userAgent ?? ''}`
@@ -45,6 +47,25 @@ function getPlatformLabel() {
   return 'Desktop'
 }
 
+function formatPublishedDate(value: string | null) {
+  if (!value) {
+    return '未检查'
+  }
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
+}
+
 export default function SettingsPage() {
   const { notify } = useToast()
   const initialPreferences = loadPreferences()
@@ -59,6 +80,8 @@ export default function SettingsPage() {
   const [customModalOpen, setCustomModalOpen] = useState(false)
   const [customAppName, setCustomAppName] = useState('')
   const [customAppPath, setCustomAppPath] = useState('')
+  const [checkingUpdates, setCheckingUpdates] = useState(false)
+  const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null)
 
   const appliedTheme = resolveAppliedTheme(preferences.theme)
   const platformLabel = useMemo(() => getPlatformLabel(), [])
@@ -192,6 +215,37 @@ export default function SettingsPage() {
       notify('自定义扫描路径已添加', 'success')
     } catch (error) {
       notify(`添加自定义路径失败: ${String(error)}`, 'error')
+    }
+  }
+
+  async function handleCheckUpdates() {
+    if (checkingUpdates) {
+      return
+    }
+
+    setCheckingUpdates(true)
+
+    try {
+      const result = await checkUpdates()
+      setUpdateResult(result)
+
+      if (result.updateAvailable && result.latestVersion) {
+        notify(`发现新版本 ${result.latestVersion}`, 'success')
+      } else {
+        notify('当前已经是 GitHub 上的最新正式版本', 'success')
+      }
+    } catch (error) {
+      notify(`检查更新失败: ${String(error)}`, 'error')
+    } finally {
+      setCheckingUpdates(false)
+    }
+  }
+
+  async function handleOpenReleasePage() {
+    try {
+      await openExternal(updateResult?.releaseUrl || releasesUrl)
+    } catch (error) {
+      notify(`打开发布页失败: ${String(error)}`, 'error')
     }
   }
 
@@ -412,6 +466,18 @@ export default function SettingsPage() {
               <strong>{version}</strong>
             </div>
             <div className="settings-info-row">
+              <span>GitHub 最新版</span>
+              <strong>{updateResult?.latestVersion ?? '未检查'}</strong>
+            </div>
+            <div className="settings-info-row">
+              <span>更新状态</span>
+              <strong>{updateResult ? (updateResult.updateAvailable ? '发现新版本' : '已是最新') : '未检查'}</strong>
+            </div>
+            <div className="settings-info-row">
+              <span>发布时间</span>
+              <strong>{formatPublishedDate(updateResult?.publishedAt ?? null)}</strong>
+            </div>
+            <div className="settings-info-row">
               <span>平台</span>
               <strong>{platformLabel}</strong>
             </div>
@@ -419,14 +485,30 @@ export default function SettingsPage() {
               <span>许可证</span>
               <strong>MIT</strong>
             </div>
-            <button
-              className="button button--ghost settings-repo-button"
-              type="button"
-              onClick={() => window.open(repoUrl, '_blank', 'noopener,noreferrer')}
-            >
-              <ExternalLink size={16} />
-              打开 GitHub 仓库
-            </button>
+            {updateResult?.notes ? (
+              <div className="settings-update-note">
+                <span>Release 说明</span>
+                <p>{updateResult.notes}</p>
+              </div>
+            ) : null}
+            <div className="settings-actions-row">
+              <button className="button button--ghost settings-repo-button" type="button" onClick={() => void handleCheckUpdates()}>
+                <RefreshCcw size={16} />
+                {checkingUpdates ? '检查中...' : '检查更新'}
+              </button>
+              <button className="button button--ghost settings-repo-button" type="button" onClick={() => void handleOpenReleasePage()}>
+                <ExternalLink size={16} />
+                打开 Releases
+              </button>
+              <button
+                className="button button--ghost settings-repo-button"
+                type="button"
+                onClick={() => void openExternal(repoUrl)}
+              >
+                <ExternalLink size={16} />
+                打开 GitHub 仓库
+              </button>
+            </div>
           </div>
         </section>
 

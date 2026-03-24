@@ -70,3 +70,13 @@ export interface AppPreferences {
   desktopNotifications: boolean
   theme: 'system' | 'light' | 'dark'
 }
+
+export interface UpdateCheckResult {
+  currentVersion: string
+  latestVersion: string | null
+  updateAvailable: boolean
+  releaseUrl: string
+  releaseName: string | null
+  publishedAt: string | null
+  notes: string | null
+}

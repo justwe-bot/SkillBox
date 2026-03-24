@@ -6,6 +6,7 @@ import type {
   GitSyncConfig,
   ScanAppsResponse,
   SkillRecord,
+  UpdateCheckResult,
 } from '../types'
 
 function mapApp(app: BackendApp): AppRecord {
@@ -105,6 +106,10 @@ export function launchApp(appId: string) {
 
 export function getVersion() {
   return invoke<string>('get_version')
+}
+
+export function checkUpdates() {
+  return invoke<UpdateCheckResult>('check_updates')
 }
 
 export async function loadSkillInventory(apps: AppRecord[]): Promise<SkillRecord[]> {

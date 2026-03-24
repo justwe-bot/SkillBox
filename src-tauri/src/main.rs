@@ -78,7 +78,30 @@ struct ParsedSkillMetadata {
     description: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCheckResult {
+    current_version: String,
+    latest_version: Option<String>,
+    update_available: bool,
+    release_url: String,
+    release_name: Option<String>,
+    published_at: Option<String>,
+    notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    html_url: String,
+    name: Option<String>,
+    body: Option<String>,
+    published_at: Option<String>,
+}
+
 const SYNC_MANIFEST_FILE: &str = ".skillbox-sync.json";
+const GITHUB_REPOSITORY: &str = "justwe-bot/SkillBox";
+const GITHUB_REPOSITORY_URL: &str = "https://github.com/justwe-bot/SkillBox";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScanPlatform {
@@ -1874,14 +1897,106 @@ fn save_git_path(path: String) -> Result<(), String> {
     save_config(&config)
 }
 
+fn normalize_version(value: &str) -> Option<Vec<u64>> {
+    let core = value
+        .trim()
+        .trim_start_matches('v')
+        .split(['-', '+'])
+        .next()
+        .unwrap_or_default();
+
+    let mut parts = Vec::new();
+
+    for segment in core.split('.') {
+        if segment.is_empty() {
+            return None;
+        }
+
+        parts.push(segment.parse::<u64>().ok()?);
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts)
+    }
+}
+
+fn is_version_newer(current: &str, latest: &str) -> bool {
+    let Some(mut current_parts) = normalize_version(current) else {
+        return current.trim() != latest.trim();
+    };
+    let Some(mut latest_parts) = normalize_version(latest) else {
+        return current.trim() != latest.trim();
+    };
+
+    let max_len = current_parts.len().max(latest_parts.len());
+    current_parts.resize(max_len, 0);
+    latest_parts.resize(max_len, 0);
+
+    latest_parts > current_parts
+}
+
 #[tauri::command]
-fn check_updates() -> Result<String, String> {
-    Ok("You are using the latest version".to_string())
+async fn check_updates() -> Result<UpdateCheckResult, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let release_url = format!("{}/releases", GITHUB_REPOSITORY_URL);
+    let api_url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        GITHUB_REPOSITORY
+    );
+
+    let client = reqwest::Client::builder()
+        .user_agent(format!("SkillBox/{}", current_version))
+        .build()
+        .map_err(|error| format!("Failed to create update client: {}", error))?;
+
+    let response = client
+        .get(api_url)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|error| format!("Failed to request latest release: {}", error))?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(UpdateCheckResult {
+            current_version,
+            latest_version: None,
+            update_available: false,
+            release_url,
+            release_name: None,
+            published_at: None,
+            notes: Some("GitHub Releases 里还没有正式版本。".to_string()),
+        });
+    }
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "GitHub release check failed with status {}",
+            response.status()
+        ));
+    }
+
+    let release = response
+        .json::<GitHubRelease>()
+        .await
+        .map_err(|error| format!("Failed to parse GitHub release response: {}", error))?;
+    let latest_version = release.tag_name.trim().trim_start_matches('v').to_string();
+
+    Ok(UpdateCheckResult {
+        current_version: current_version.clone(),
+        latest_version: Some(latest_version.clone()),
+        update_available: is_version_newer(&current_version, &latest_version),
+        release_url: release.html_url,
+        release_name: release.name,
+        published_at: release.published_at,
+        notes: release.body.map(|value| value.trim().to_string()),
+    })
 }
 
 #[tauri::command]
 fn get_version() -> String {
-    "1.0.0".to_string()
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 #[tauri::command]

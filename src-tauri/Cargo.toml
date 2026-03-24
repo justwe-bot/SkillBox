@@ -1,10 +1,10 @@
 [package]
 name = "skillbox"
-version = "1.0.0"
+version = "2026.3.24"
 description = "A cross-platform skill management tool"
 authors = ["SkillBox"]
 license = "MIT"
-repository = ""
+repository = "https://github.com/justwe-bot/SkillBox"
 edition = "2021"
 
 [build-dependencies]

@@ -21,12 +21,16 @@ jobs:
             platform: macos-latest
             args: --target aarch64-apple-darwin
             artifact_name: skillbox-macos-aarch64
-            artifact_path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*
+            artifact_path: |
+              src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*
+              src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*
           - name: macOS Intel
             platform: macos-latest
             args: --target x86_64-apple-darwin
             artifact_name: skillbox-macos-x64
-            artifact_path: src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*
+            artifact_path: |
+              src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*
+              src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*
           - name: Windows
             platform: windows-latest
             args: --bundles nsis
@@ -58,11 +62,7 @@ jobs:
         run: npm ci
 
       - name: Build Tauri bundles
-        uses: tauri-apps/tauri-action@v0.6.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          args: ${{ matrix.args }}
+        run: npm run tauri -- build ${{ matrix.args }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

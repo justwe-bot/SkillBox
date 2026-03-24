@@ -10,8 +10,8 @@ permissions:
   contents: write
 
 jobs:
-  publish:
-    name: Release ${{ matrix.name }}
+  bundle:
+    name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.platform }}
     strategy:
       fail-fast: false
@@ -20,12 +20,22 @@ jobs:
           - name: macOS Apple Silicon
             platform: macos-latest
             args: --target aarch64-apple-darwin
+            artifact_name: skillbox-release-macos-aarch64
+            artifact_path: |
+              src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*
+              src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*
           - name: macOS Intel
             platform: macos-latest
             args: --target x86_64-apple-darwin
+            artifact_name: skillbox-release-macos-x64
+            artifact_path: |
+              src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*
+              src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*
           - name: Windows
             platform: windows-latest
             args: --bundles nsis
+            artifact_name: skillbox-release-windows-x64
+            artifact_path: src-tauri/target/release/bundle/nsis/*
 
     steps:
       - name: Checkout
@@ -51,15 +61,35 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Publish GitHub Release assets
-        uses: tauri-apps/tauri-action@v0.6.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Tauri bundles
+        run: npm run tauri -- build ${{ matrix.args }}
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: SkillBox ${{ github.ref_name }}
-          releaseBody: See the assets to download this version and install.
-          generateReleaseNotes: true
-          releaseDraft: false
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs: bundle
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Publish GitHub Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: SkillBox ${{ github.ref_name }}
+          body: See the assets to download this version and install.
+          generate_release_notes: true
+          draft: false
           prerelease: false
-          args: ${{ matrix.args }}
+          fail_on_unmatched_files: true
+          files: release-artifacts/**/*

@@ -5,9 +5,12 @@
 
 mod figma;
 
-use sha2::{Digest, Sha256};
-use figma::{FigmaClient, FigmaFileData, DesignToken, FigmaComment, FigmaFile, extract_design_tokens, extract_css_from_node, find_nodes_by_type, find_nodes_by_name};
+use figma::{
+    extract_css_from_node, extract_design_tokens, find_nodes_by_name, find_nodes_by_type,
+    DesignToken, FigmaClient, FigmaComment, FigmaFile, FigmaFileData,
+};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -77,83 +80,124 @@ struct ParsedSkillMetadata {
 
 const SYNC_MANIFEST_FILE: &str = ".skillbox-sync.json";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanPlatform {
+    MacOs,
+    Windows,
+    Linux,
+}
+
+impl ScanPlatform {
+    fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else if cfg!(target_os = "windows") {
+            Self::Windows
+        } else {
+            Self::Linux
+        }
+    }
+}
+
+fn known_app(
+    id: &str,
+    name: &str,
+    icon: &str,
+    skill_paths: Vec<PathBuf>,
+    install_markers: Vec<PathBuf>,
+) -> KnownApp {
+    KnownApp {
+        id: id.to_string(),
+        name: name.to_string(),
+        icon: icon.to_string(),
+        skill_paths,
+        install_markers,
+    }
+}
+
 fn build_known_apps() -> Vec<KnownApp> {
     let home = dirs::home_dir().unwrap_or_default();
-    let mut apps = Vec::new();
 
-    #[cfg(target_os = "macos")]
-    {
-        let app_support = home.join("Library/Application Support");
+    match ScanPlatform::current() {
+        ScanPlatform::MacOs => build_macos_known_apps(&home),
+        ScanPlatform::Windows => build_windows_known_apps(&home),
+        ScanPlatform::Linux => build_linux_known_apps(&home),
+    }
+}
 
-        apps.push(KnownApp {
-            id: "codex".to_string(),
-            name: "Codex".to_string(),
-            icon: "📦".to_string(),
-            skill_paths: vec![home.join(".codex/skills")],
-            install_markers: vec![
+fn build_macos_known_apps(home: &Path) -> Vec<KnownApp> {
+    let app_support = home.join("Library/Application Support");
+
+    vec![
+        known_app(
+            "codex",
+            "Codex",
+            "📦",
+            vec![home.join(".codex/skills")],
+            vec![
                 PathBuf::from("/Applications/Codex.app"),
                 home.join(".codex"),
                 home.join(".codex/config.toml"),
             ],
-        });
-        apps.push(KnownApp {
-            id: "openclaw".to_string(),
-            name: "Openclaw".to_string(),
-            icon: "🦀".to_string(),
-            skill_paths: vec![home.join(".openclaw/skills")],
-            install_markers: vec![home.join(".openclaw")],
-        });
-        apps.push(KnownApp {
-            id: "opencode".to_string(),
-            name: "Opencode".to_string(),
-            icon: "💻".to_string(),
-            skill_paths: vec![home.join(".config/opencode/skills")],
-            install_markers: vec![home.join(".config/opencode")],
-        });
-        apps.push(KnownApp {
-            id: "cline".to_string(),
-            name: "Cline".to_string(),
-            icon: "⚡".to_string(),
-            skill_paths: vec![home.join(".cline/skills"), home.join(".cline/rules")],
-            install_markers: vec![home.join(".cline")],
-        });
-        apps.push(KnownApp {
-            id: "cursor".to_string(),
-            name: "Cursor".to_string(),
-            icon: "🎯".to_string(),
-            skill_paths: vec![
+        ),
+        known_app(
+            "openclaw",
+            "Openclaw",
+            "🦀",
+            vec![home.join(".openclaw/skills")],
+            vec![home.join(".openclaw")],
+        ),
+        known_app(
+            "opencode",
+            "Opencode",
+            "💻",
+            vec![home.join(".config/opencode/skills")],
+            vec![home.join(".config/opencode")],
+        ),
+        known_app(
+            "cline",
+            "Cline",
+            "⚡",
+            vec![home.join(".cline/skills"), home.join(".cline/rules")],
+            vec![home.join(".cline")],
+        ),
+        known_app(
+            "cursor",
+            "Cursor",
+            "🎯",
+            vec![
                 home.join(".cursor/rules"),
                 home.join(".cursor/skills"),
                 app_support.join("Cursor/User/globalStorage/skills"),
             ],
-            install_markers: vec![
+            vec![
                 PathBuf::from("/Applications/Cursor.app"),
                 app_support.join("Cursor"),
                 home.join(".cursor"),
             ],
-        });
-        apps.push(KnownApp {
-            id: "windsurf".to_string(),
-            name: "Windsurf".to_string(),
-            icon: "🌊".to_string(),
-            skill_paths: vec![
+        ),
+        known_app(
+            "windsurf",
+            "Windsurf",
+            "🌊",
+            vec![
                 home.join(".windsurf/rules"),
                 home.join(".windsurf/skills"),
                 app_support.join("Codeium/windsurf/memories"),
                 app_support.join("Windsurf/User/globalStorage/skills"),
             ],
-            install_markers: vec![
+            vec![
                 PathBuf::from("/Applications/Windsurf.app"),
                 app_support.join("Windsurf"),
                 app_support.join("Codeium"),
                 home.join(".windsurf"),
             ],
-        });
-        apps.push(KnownApp {
-            id: "trae".to_string(),
-            name: "Trae".to_string(),
-            icon: "🧭".to_string(),
-            skill_paths: vec![
+        ),
+        known_app(
+            "trae",
+            "Trae",
+            "🧭",
+            vec![
                 home.join(".trae/skills"),
                 home.join(".trae-cn/skills"),
                 home.join(".trae/rules"),
@@ -161,7 +205,7 @@ fn build_known_apps() -> Vec<KnownApp> {
                 app_support.join("Trae/User/globalStorage"),
                 app_support.join("Trae CN/User/globalStorage"),
             ],
-            install_markers: vec![
+            vec![
                 PathBuf::from("/Applications/Trae.app"),
                 PathBuf::from("/Applications/Trae CN.app"),
                 app_support.join("Trae"),
@@ -169,175 +213,173 @@ fn build_known_apps() -> Vec<KnownApp> {
                 home.join(".trae"),
                 home.join(".trae-cn"),
             ],
-        });
-        apps.push(KnownApp {
-            id: "kiro".to_string(),
-            name: "Kiro".to_string(),
-            icon: "🪄".to_string(),
-            skill_paths: vec![
+        ),
+        known_app(
+            "kiro",
+            "Kiro",
+            "🪄",
+            vec![
                 home.join(".kiro/steering"),
                 home.join(".kiro/hooks"),
                 home.join(".kiro/agents"),
             ],
-            install_markers: vec![
+            vec![
                 PathBuf::from("/Applications/Kiro.app"),
                 app_support.join("Kiro"),
                 home.join(".kiro"),
             ],
-        });
-        apps.push(KnownApp {
-            id: "qoder".to_string(),
-            name: "Qoder".to_string(),
-            icon: "🧩".to_string(),
-            skill_paths: vec![
+        ),
+        known_app(
+            "qoder",
+            "Qoder",
+            "🧩",
+            vec![
                 home.join(".qoder/commands"),
                 home.join(".qoder/agents"),
                 home.join(".qoder/rules"),
             ],
-            install_markers: vec![
+            vec![
                 PathBuf::from("/Applications/Qoder.app"),
                 app_support.join("Qoder"),
                 home.join(".qoder"),
             ],
-        });
-        apps.push(KnownApp {
-            id: "codebuddy".to_string(),
-            name: "CodeBuddy".to_string(),
-            icon: "🤝".to_string(),
-            skill_paths: vec![
+        ),
+        known_app(
+            "codebuddy",
+            "CodeBuddy",
+            "🤝",
+            vec![
                 home.join(".codebuddy/skills"),
                 home.join(".codebuddy/prompts"),
             ],
-            install_markers: vec![
+            vec![
                 PathBuf::from("/Applications/CodeBuddy.app"),
                 app_support.join("CodeBuddy"),
                 home.join(".codebuddy"),
                 home.join("CodeBuddy"),
             ],
-        });
-        apps.push(KnownApp {
-            id: "copilot".to_string(),
-            name: "GitHub Copilot".to_string(),
-            icon: "🧠".to_string(),
-            skill_paths: vec![
+        ),
+        known_app(
+            "copilot",
+            "GitHub Copilot",
+            "🧠",
+            vec![
                 home.join(".copilot/copilot-instructions.md"),
                 home.join(".github/copilot-instructions.md"),
                 home.join(".github/instructions"),
             ],
-            install_markers: vec![
-                home.join(".copilot"),
-                app_support.join("GitHub Copilot"),
-            ],
-        });
-        apps.push(KnownApp {
-            id: "claude".to_string(),
-            name: "Claude".to_string(),
-            icon: "🤖".to_string(),
-            skill_paths: vec![
+            vec![home.join(".copilot"), app_support.join("GitHub Copilot")],
+        ),
+        known_app(
+            "claude",
+            "Claude",
+            "🤖",
+            vec![
                 home.join(".claude/skills"),
                 app_support.join("Claude/claude_desktop_skills"),
             ],
-            install_markers: vec![
+            vec![
                 PathBuf::from("/Applications/Claude.app"),
                 app_support.join("Claude"),
                 home.join(".claude"),
             ],
-        });
-        apps.push(KnownApp {
-            id: "aider".to_string(),
-            name: "Aider".to_string(),
-            icon: "🔧".to_string(),
-            skill_paths: vec![home.join(".aider/skills")],
-            install_markers: vec![home.join(".aider")],
-        });
-        apps.push(KnownApp {
-            id: "continue".to_string(),
-            name: "Continue".to_string(),
-            icon: "▶️".to_string(),
-            skill_paths: vec![
+        ),
+        known_app(
+            "aider",
+            "Aider",
+            "🔧",
+            vec![home.join(".aider/skills")],
+            vec![home.join(".aider")],
+        ),
+        known_app(
+            "continue",
+            "Continue",
+            "▶️",
+            vec![
                 home.join(".continue/rules"),
                 home.join(".continue/prompts"),
                 home.join(".continue/checks"),
                 home.join(".continue/skills"),
             ],
-            install_markers: vec![home.join(".continue")],
-        });
-        apps.push(KnownApp {
-            id: "gemini".to_string(),
-            name: "Gemini CLI".to_string(),
-            icon: "✨".to_string(),
-            skill_paths: vec![
+            vec![home.join(".continue")],
+        ),
+        known_app(
+            "gemini",
+            "Gemini CLI",
+            "✨",
+            vec![
                 home.join(".gemini/commands"),
                 home.join(".gemini/GEMINI.md"),
             ],
-            install_markers: vec![home.join(".gemini"), home.join(".gemini/settings.json")],
-        });
-    }
+            vec![home.join(".gemini"), home.join(".gemini/settings.json")],
+        ),
+    ]
+}
 
-    #[cfg(target_os = "windows")]
-    {
-        let app_data = PathBuf::from(std::env::var("APPDATA").unwrap_or_default());
+fn build_windows_known_apps(home: &Path) -> Vec<KnownApp> {
+    let app_data = PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default());
 
-        apps.push(KnownApp {
-            id: "codex".to_string(),
-            name: "Codex".to_string(),
-            icon: "📦".to_string(),
-            skill_paths: vec![home.join(".codex/skills")],
-            install_markers: vec![home.join(".codex"), home.join(".codex/config.toml")],
-        });
-        apps.push(KnownApp {
-            id: "openclaw".to_string(),
-            name: "Openclaw".to_string(),
-            icon: "🦀".to_string(),
-            skill_paths: vec![home.join(".openclaw/skills")],
-            install_markers: vec![home.join(".openclaw")],
-        });
-        apps.push(KnownApp {
-            id: "opencode".to_string(),
-            name: "Opencode".to_string(),
-            icon: "💻".to_string(),
-            skill_paths: vec![home.join(".config/opencode/skills")],
-            install_markers: vec![home.join(".config/opencode")],
-        });
-        apps.push(KnownApp {
-            id: "cline".to_string(),
-            name: "Cline".to_string(),
-            icon: "⚡".to_string(),
-            skill_paths: vec![home.join(".cline/skills"), home.join(".cline/rules")],
-            install_markers: vec![home.join(".cline")],
-        });
-        apps.push(KnownApp {
-            id: "cursor".to_string(),
-            name: "Cursor".to_string(),
-            icon: "🎯".to_string(),
-            skill_paths: vec![
+    vec![
+        known_app(
+            "codex",
+            "Codex",
+            "📦",
+            vec![home.join(".codex/skills")],
+            vec![home.join(".codex"), home.join(".codex/config.toml")],
+        ),
+        known_app(
+            "openclaw",
+            "Openclaw",
+            "🦀",
+            vec![home.join(".openclaw/skills")],
+            vec![home.join(".openclaw")],
+        ),
+        known_app(
+            "opencode",
+            "Opencode",
+            "💻",
+            vec![home.join(".config/opencode/skills")],
+            vec![home.join(".config/opencode")],
+        ),
+        known_app(
+            "cline",
+            "Cline",
+            "⚡",
+            vec![home.join(".cline/skills"), home.join(".cline/rules")],
+            vec![home.join(".cline")],
+        ),
+        known_app(
+            "cursor",
+            "Cursor",
+            "🎯",
+            vec![
                 home.join(".cursor/rules"),
                 home.join(".cursor/skills"),
                 app_data.join("Cursor/User/globalStorage/skills"),
             ],
-            install_markers: vec![app_data.join("Cursor"), home.join(".cursor")],
-        });
-        apps.push(KnownApp {
-            id: "windsurf".to_string(),
-            name: "Windsurf".to_string(),
-            icon: "🌊".to_string(),
-            skill_paths: vec![
+            vec![app_data.join("Cursor"), home.join(".cursor")],
+        ),
+        known_app(
+            "windsurf",
+            "Windsurf",
+            "🌊",
+            vec![
                 home.join(".windsurf/rules"),
                 home.join(".windsurf/skills"),
                 app_data.join("Codeium/windsurf/memories"),
                 app_data.join("Windsurf/User/globalStorage/skills"),
             ],
-            install_markers: vec![
+            vec![
                 app_data.join("Windsurf"),
                 app_data.join("Codeium"),
                 home.join(".windsurf"),
             ],
-        });
-        apps.push(KnownApp {
-            id: "trae".to_string(),
-            name: "Trae".to_string(),
-            icon: "🧭".to_string(),
-            skill_paths: vec![
+        ),
+        known_app(
+            "trae",
+            "Trae",
+            "🧭",
+            vec![
                 home.join(".trae/skills"),
                 home.join(".trae-cn/skills"),
                 home.join(".trae/rules"),
@@ -345,174 +387,166 @@ fn build_known_apps() -> Vec<KnownApp> {
                 app_data.join("Trae/User/globalStorage"),
                 app_data.join("Trae CN/User/globalStorage"),
             ],
-            install_markers: vec![
+            vec![
                 app_data.join("Trae"),
                 app_data.join("Trae CN"),
                 home.join(".trae"),
                 home.join(".trae-cn"),
             ],
-        });
-        apps.push(KnownApp {
-            id: "kiro".to_string(),
-            name: "Kiro".to_string(),
-            icon: "🪄".to_string(),
-            skill_paths: vec![
+        ),
+        known_app(
+            "kiro",
+            "Kiro",
+            "🪄",
+            vec![
                 home.join(".kiro/steering"),
                 home.join(".kiro/hooks"),
                 home.join(".kiro/agents"),
             ],
-            install_markers: vec![
-                app_data.join("Kiro"),
-                home.join(".kiro"),
-            ],
-        });
-        apps.push(KnownApp {
-            id: "qoder".to_string(),
-            name: "Qoder".to_string(),
-            icon: "🧩".to_string(),
-            skill_paths: vec![
+            vec![app_data.join("Kiro"), home.join(".kiro")],
+        ),
+        known_app(
+            "qoder",
+            "Qoder",
+            "🧩",
+            vec![
                 home.join(".qoder/commands"),
                 home.join(".qoder/agents"),
                 home.join(".qoder/rules"),
             ],
-            install_markers: vec![
-                app_data.join("Qoder"),
-                home.join(".qoder"),
-            ],
-        });
-        apps.push(KnownApp {
-            id: "codebuddy".to_string(),
-            name: "CodeBuddy".to_string(),
-            icon: "🤝".to_string(),
-            skill_paths: vec![
+            vec![app_data.join("Qoder"), home.join(".qoder")],
+        ),
+        known_app(
+            "codebuddy",
+            "CodeBuddy",
+            "🤝",
+            vec![
                 home.join(".codebuddy/skills"),
                 home.join(".codebuddy/prompts"),
             ],
-            install_markers: vec![
+            vec![
                 app_data.join("CodeBuddy"),
                 home.join(".codebuddy"),
                 home.join("CodeBuddy"),
             ],
-        });
-        apps.push(KnownApp {
-            id: "copilot".to_string(),
-            name: "GitHub Copilot".to_string(),
-            icon: "🧠".to_string(),
-            skill_paths: vec![
+        ),
+        known_app(
+            "copilot",
+            "GitHub Copilot",
+            "🧠",
+            vec![
                 home.join(".copilot/copilot-instructions.md"),
                 home.join(".github/copilot-instructions.md"),
                 home.join(".github/instructions"),
             ],
-            install_markers: vec![
-                home.join(".copilot"),
-                app_data.join("GitHub Copilot"),
-            ],
-        });
-        apps.push(KnownApp {
-            id: "claude".to_string(),
-            name: "Claude".to_string(),
-            icon: "🤖".to_string(),
-            skill_paths: vec![
+            vec![home.join(".copilot"), app_data.join("GitHub Copilot")],
+        ),
+        known_app(
+            "claude",
+            "Claude",
+            "🤖",
+            vec![
                 home.join(".claude/skills"),
                 app_data.join("Claude/claude_desktop_skills"),
             ],
-            install_markers: vec![app_data.join("Claude"), home.join(".claude")],
-        });
-        apps.push(KnownApp {
-            id: "aider".to_string(),
-            name: "Aider".to_string(),
-            icon: "🔧".to_string(),
-            skill_paths: vec![home.join(".aider/skills")],
-            install_markers: vec![home.join(".aider")],
-        });
-        apps.push(KnownApp {
-            id: "continue".to_string(),
-            name: "Continue".to_string(),
-            icon: "▶️".to_string(),
-            skill_paths: vec![
+            vec![app_data.join("Claude"), home.join(".claude")],
+        ),
+        known_app(
+            "aider",
+            "Aider",
+            "🔧",
+            vec![home.join(".aider/skills")],
+            vec![home.join(".aider")],
+        ),
+        known_app(
+            "continue",
+            "Continue",
+            "▶️",
+            vec![
                 home.join(".continue/rules"),
                 home.join(".continue/prompts"),
                 home.join(".continue/checks"),
                 home.join(".continue/skills"),
             ],
-            install_markers: vec![home.join(".continue")],
-        });
-        apps.push(KnownApp {
-            id: "gemini".to_string(),
-            name: "Gemini CLI".to_string(),
-            icon: "✨".to_string(),
-            skill_paths: vec![
+            vec![home.join(".continue")],
+        ),
+        known_app(
+            "gemini",
+            "Gemini CLI",
+            "✨",
+            vec![
                 home.join(".gemini/commands"),
                 home.join(".gemini/GEMINI.md"),
             ],
-            install_markers: vec![home.join(".gemini"), home.join(".gemini/settings.json")],
-        });
-    }
+            vec![home.join(".gemini"), home.join(".gemini/settings.json")],
+        ),
+    ]
+}
 
-    #[cfg(target_os = "linux")]
-    {
-        let config_dir = home.join(".config");
+fn build_linux_known_apps(home: &Path) -> Vec<KnownApp> {
+    let config_dir = home.join(".config");
 
-        apps.push(KnownApp {
-            id: "codex".to_string(),
-            name: "Codex".to_string(),
-            icon: "📦".to_string(),
-            skill_paths: vec![home.join(".codex/skills")],
-            install_markers: vec![home.join(".codex"), home.join(".codex/config.toml")],
-        });
-        apps.push(KnownApp {
-            id: "openclaw".to_string(),
-            name: "Openclaw".to_string(),
-            icon: "🦀".to_string(),
-            skill_paths: vec![home.join(".openclaw/skills")],
-            install_markers: vec![home.join(".openclaw")],
-        });
-        apps.push(KnownApp {
-            id: "opencode".to_string(),
-            name: "Opencode".to_string(),
-            icon: "💻".to_string(),
-            skill_paths: vec![config_dir.join("opencode/skills")],
-            install_markers: vec![config_dir.join("opencode")],
-        });
-        apps.push(KnownApp {
-            id: "cline".to_string(),
-            name: "Cline".to_string(),
-            icon: "⚡".to_string(),
-            skill_paths: vec![home.join(".cline/skills"), home.join(".cline/rules")],
-            install_markers: vec![home.join(".cline")],
-        });
-        apps.push(KnownApp {
-            id: "cursor".to_string(),
-            name: "Cursor".to_string(),
-            icon: "🎯".to_string(),
-            skill_paths: vec![
+    vec![
+        known_app(
+            "codex",
+            "Codex",
+            "📦",
+            vec![home.join(".codex/skills")],
+            vec![home.join(".codex"), home.join(".codex/config.toml")],
+        ),
+        known_app(
+            "openclaw",
+            "Openclaw",
+            "🦀",
+            vec![home.join(".openclaw/skills")],
+            vec![home.join(".openclaw")],
+        ),
+        known_app(
+            "opencode",
+            "Opencode",
+            "💻",
+            vec![config_dir.join("opencode/skills")],
+            vec![config_dir.join("opencode")],
+        ),
+        known_app(
+            "cline",
+            "Cline",
+            "⚡",
+            vec![home.join(".cline/skills"), home.join(".cline/rules")],
+            vec![home.join(".cline")],
+        ),
+        known_app(
+            "cursor",
+            "Cursor",
+            "🎯",
+            vec![
                 home.join(".cursor/rules"),
                 home.join(".cursor/skills"),
                 config_dir.join("Cursor/User/globalStorage/skills"),
             ],
-            install_markers: vec![config_dir.join("Cursor"), home.join(".cursor")],
-        });
-        apps.push(KnownApp {
-            id: "windsurf".to_string(),
-            name: "Windsurf".to_string(),
-            icon: "🌊".to_string(),
-            skill_paths: vec![
+            vec![config_dir.join("Cursor"), home.join(".cursor")],
+        ),
+        known_app(
+            "windsurf",
+            "Windsurf",
+            "🌊",
+            vec![
                 home.join(".windsurf/rules"),
                 home.join(".windsurf/skills"),
                 config_dir.join("Codeium/windsurf/memories"),
                 config_dir.join("Windsurf/User/globalStorage/skills"),
             ],
-            install_markers: vec![
+            vec![
                 config_dir.join("Windsurf"),
                 config_dir.join("Codeium"),
                 home.join(".windsurf"),
             ],
-        });
-        apps.push(KnownApp {
-            id: "trae".to_string(),
-            name: "Trae".to_string(),
-            icon: "🧭".to_string(),
-            skill_paths: vec![
+        ),
+        known_app(
+            "trae",
+            "Trae",
+            "🧭",
+            vec![
                 home.join(".trae/skills"),
                 home.join(".trae-cn/skills"),
                 home.join(".trae/rules"),
@@ -520,111 +554,100 @@ fn build_known_apps() -> Vec<KnownApp> {
                 config_dir.join("Trae/User/globalStorage"),
                 config_dir.join("Trae CN/User/globalStorage"),
             ],
-            install_markers: vec![
+            vec![
                 config_dir.join("Trae"),
                 config_dir.join("Trae CN"),
                 home.join(".trae"),
                 home.join(".trae-cn"),
             ],
-        });
-        apps.push(KnownApp {
-            id: "kiro".to_string(),
-            name: "Kiro".to_string(),
-            icon: "🪄".to_string(),
-            skill_paths: vec![
+        ),
+        known_app(
+            "kiro",
+            "Kiro",
+            "🪄",
+            vec![
                 home.join(".kiro/steering"),
                 home.join(".kiro/hooks"),
                 home.join(".kiro/agents"),
             ],
-            install_markers: vec![
-                config_dir.join("Kiro"),
-                home.join(".kiro"),
-            ],
-        });
-        apps.push(KnownApp {
-            id: "qoder".to_string(),
-            name: "Qoder".to_string(),
-            icon: "🧩".to_string(),
-            skill_paths: vec![
+            vec![config_dir.join("Kiro"), home.join(".kiro")],
+        ),
+        known_app(
+            "qoder",
+            "Qoder",
+            "🧩",
+            vec![
                 home.join(".qoder/commands"),
                 home.join(".qoder/agents"),
                 home.join(".qoder/rules"),
             ],
-            install_markers: vec![
-                config_dir.join("Qoder"),
-                home.join(".qoder"),
-            ],
-        });
-        apps.push(KnownApp {
-            id: "codebuddy".to_string(),
-            name: "CodeBuddy".to_string(),
-            icon: "🤝".to_string(),
-            skill_paths: vec![
+            vec![config_dir.join("Qoder"), home.join(".qoder")],
+        ),
+        known_app(
+            "codebuddy",
+            "CodeBuddy",
+            "🤝",
+            vec![
                 home.join(".codebuddy/skills"),
                 home.join(".codebuddy/prompts"),
             ],
-            install_markers: vec![
+            vec![
                 config_dir.join("CodeBuddy"),
                 home.join(".codebuddy"),
                 home.join("CodeBuddy"),
             ],
-        });
-        apps.push(KnownApp {
-            id: "copilot".to_string(),
-            name: "GitHub Copilot".to_string(),
-            icon: "🧠".to_string(),
-            skill_paths: vec![
+        ),
+        known_app(
+            "copilot",
+            "GitHub Copilot",
+            "🧠",
+            vec![
                 home.join(".copilot/copilot-instructions.md"),
                 home.join(".github/copilot-instructions.md"),
                 home.join(".github/instructions"),
             ],
-            install_markers: vec![
-                home.join(".copilot"),
-                config_dir.join("GitHub Copilot"),
-            ],
-        });
-        apps.push(KnownApp {
-            id: "claude".to_string(),
-            name: "Claude".to_string(),
-            icon: "🤖".to_string(),
-            skill_paths: vec![
+            vec![home.join(".copilot"), config_dir.join("GitHub Copilot")],
+        ),
+        known_app(
+            "claude",
+            "Claude",
+            "🤖",
+            vec![
                 home.join(".claude/skills"),
                 config_dir.join("claude/claude_desktop_skills"),
             ],
-            install_markers: vec![config_dir.join("claude"), home.join(".claude")],
-        });
-        apps.push(KnownApp {
-            id: "aider".to_string(),
-            name: "Aider".to_string(),
-            icon: "🔧".to_string(),
-            skill_paths: vec![home.join(".aider/skills")],
-            install_markers: vec![home.join(".aider")],
-        });
-        apps.push(KnownApp {
-            id: "continue".to_string(),
-            name: "Continue".to_string(),
-            icon: "▶️".to_string(),
-            skill_paths: vec![
+            vec![config_dir.join("claude"), home.join(".claude")],
+        ),
+        known_app(
+            "aider",
+            "Aider",
+            "🔧",
+            vec![home.join(".aider/skills")],
+            vec![home.join(".aider")],
+        ),
+        known_app(
+            "continue",
+            "Continue",
+            "▶️",
+            vec![
                 home.join(".continue/rules"),
                 home.join(".continue/prompts"),
                 home.join(".continue/checks"),
                 home.join(".continue/skills"),
             ],
-            install_markers: vec![home.join(".continue")],
-        });
-        apps.push(KnownApp {
-            id: "gemini".to_string(),
-            name: "Gemini CLI".to_string(),
-            icon: "✨".to_string(),
-            skill_paths: vec![
+            vec![home.join(".continue")],
+        ),
+        known_app(
+            "gemini",
+            "Gemini CLI",
+            "✨",
+            vec![
                 home.join(".gemini/commands"),
                 home.join(".gemini/GEMINI.md"),
             ],
-            install_markers: vec![home.join(".gemini"), home.join(".gemini/settings.json")],
-        });
-    }
-
-    apps
+            vec![home.join(".gemini"), home.join(".gemini/settings.json")],
+        ),
+    ]
 }
 
 fn find_known_app(app_id: &str) -> Option<KnownApp> {
@@ -780,7 +803,12 @@ fn inspect_skill_target(path: &Path) -> Result<(u64, String, usize, String), Str
         total_size = metadata.len();
         file_count = 1;
         latest_modified = metadata.modified().ok();
-        hasher.update(path.file_name().and_then(|v| v.to_str()).unwrap_or_default().as_bytes());
+        hasher.update(
+            path.file_name()
+                .and_then(|v| v.to_str())
+                .unwrap_or_default()
+                .as_bytes(),
+        );
         hasher.update(&bytes);
     } else {
         for entry in WalkDir::new(path)
@@ -824,11 +852,14 @@ fn inspect_skill_target(path: &Path) -> Result<(u64, String, usize, String), Str
         }
     }
 
-    let modified = latest_modified
-        .map(format_system_time)
-        .unwrap_or_default();
+    let modified = latest_modified.map(format_system_time).unwrap_or_default();
 
-    Ok((total_size, modified, file_count, format!("{:x}", hasher.finalize())))
+    Ok((
+        total_size,
+        modified,
+        file_count,
+        format!("{:x}", hasher.finalize()),
+    ))
 }
 
 fn collect_skill_entries(path: &Path) -> Result<Vec<SkillFile>, String> {
@@ -981,7 +1012,7 @@ fn load_config() -> AppConfig {
             }
         }
     }
-    AppConfig { 
+    AppConfig {
         git_path: None,
         git_config: default_git_config(),
         custom_paths: std::collections::HashMap::new(),
@@ -1074,7 +1105,11 @@ fn remove_path_if_exists(path: &Path) -> Result<(), String> {
     }
 }
 
-fn make_flat_skill_name(skill: &SkillFile, app_id: &str, used_names: &mut std::collections::HashSet<String>) -> String {
+fn make_flat_skill_name(
+    skill: &SkillFile,
+    app_id: &str,
+    used_names: &mut std::collections::HashSet<String>,
+) -> String {
     let skill_path = PathBuf::from(&skill.path);
     let original_name = skill_path
         .file_name()
@@ -1104,7 +1139,10 @@ fn make_flat_skill_name(skill: &SkillFile, app_id: &str, used_names: &mut std::c
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("skill");
-    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or_default();
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
 
     let mut attempt = 1usize;
     loop {
@@ -1159,8 +1197,7 @@ fn ensure_repo_initialized(repo_path: &Path, git_config: &GitSyncConfig) -> Resu
             clone_args.push(repo_name);
 
             if let Err(error) = run_git(parent, &clone_args) {
-                let missing_branch = error.contains("Remote branch")
-                    && error.contains("not found");
+                let missing_branch = error.contains("Remote branch") && error.contains("not found");
 
                 if missing_branch {
                     run_git(parent, &["clone", repo_url, repo_name])?;
@@ -1184,15 +1221,24 @@ fn ensure_repo_initialized(repo_path: &Path, git_config: &GitSyncConfig) -> Resu
     }
 
     if !git_config.username.trim().is_empty() {
-        let _ = run_git(repo_path, &["config", "user.name", git_config.username.trim()]);
+        let _ = run_git(
+            repo_path,
+            &["config", "user.name", git_config.username.trim()],
+        );
     }
 
     if !git_config.repo_url.trim().is_empty() {
         let remote_exists = run_git(repo_path, &["remote", "get-url", "origin"]).is_ok();
         if remote_exists {
-            run_git(repo_path, &["remote", "set-url", "origin", git_config.repo_url.trim()])?;
+            run_git(
+                repo_path,
+                &["remote", "set-url", "origin", git_config.repo_url.trim()],
+            )?;
         } else {
-            run_git(repo_path, &["remote", "add", "origin", git_config.repo_url.trim()])?;
+            run_git(
+                repo_path,
+                &["remote", "add", "origin", git_config.repo_url.trim()],
+            )?;
         }
     }
 
@@ -1245,7 +1291,10 @@ fn stash_local_changes_if_needed(repo_path: &Path, label: &str) -> Result<bool, 
     }
 
     let stash_name = format!("skillbox-auto-stash-{}", label);
-    run_git(repo_path, &["stash", "push", "--include-untracked", "-m", &stash_name])?;
+    run_git(
+        repo_path,
+        &["stash", "push", "--include-untracked", "-m", &stash_name],
+    )?;
     Ok(true)
 }
 
@@ -1351,9 +1400,8 @@ fn open_path_in_file_manager(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        let metadata = fs::symlink_metadata(&target).map_err(|error| {
-            format!("Failed to inspect {}: {}", target.display(), error)
-        })?;
+        let metadata = fs::symlink_metadata(&target)
+            .map_err(|error| format!("Failed to inspect {}: {}", target.display(), error))?;
 
         if metadata.file_type().is_symlink() {
             let status = Command::new("open")
@@ -1429,7 +1477,7 @@ fn scan_apps() -> Result<(Vec<SkillApp>, String), String> {
             custom_path,
         });
     }
-    
+
     for (id, custom_path) in &config.custom_paths {
         if !apps.iter().any(|a| a.id == *id) {
             let is_installed = PathBuf::from(custom_path).exists();
@@ -1437,7 +1485,7 @@ fn scan_apps() -> Result<(Vec<SkillApp>, String), String> {
             let skill_count = collect_skill_entries(Path::new(custom_path))
                 .map(|entries| entries.len())
                 .unwrap_or(0);
-            
+
             apps.push(SkillApp {
                 id: id.clone(),
                 name: capitalize_first(id),
@@ -1452,7 +1500,7 @@ fn scan_apps() -> Result<(Vec<SkillApp>, String), String> {
             });
         }
     }
-    
+
     Ok((apps, git_path))
 }
 
@@ -1508,7 +1556,10 @@ fn rename_skill(skill_path: String, new_name: String) -> Result<String, String> 
     }
 
     if target.exists() {
-        return Err(format!("Target already exists: {}", target.to_string_lossy()));
+        return Err(format!(
+            "Target already exists: {}",
+            target.to_string_lossy()
+        ));
     }
 
     fs::rename(&source, &target).map_err(|e| e.to_string())?;
@@ -1539,7 +1590,7 @@ fn delete_skill(skill_path: String) -> Result<(), String> {
 #[tauri::command]
 fn set_custom_path(app_id: String, custom_path: Option<String>) -> Result<(), String> {
     let mut config = load_config();
-    
+
     if let Some(path) = custom_path {
         if !PathBuf::from(&path).exists() {
             return Err(format!("Path does not exist: {}", path));
@@ -1548,18 +1599,18 @@ fn set_custom_path(app_id: String, custom_path: Option<String>) -> Result<(), St
     } else {
         config.custom_paths.remove(&app_id);
     }
-    
+
     save_config(&config)
 }
 
 #[tauri::command]
 fn add_custom_app(name: String, path: String) -> Result<(), String> {
     let id = name.to_lowercase().replace(" ", "_");
-    
+
     if !PathBuf::from(&path).exists() {
         return Err(format!("Path does not exist: {}", path));
     }
-    
+
     let mut config = load_config();
     config.custom_paths.insert(id, path);
     save_config(&config)
@@ -1571,7 +1622,7 @@ fn sync_to_git(repo_path: String) -> Result<(), String> {
     if !repo.exists() {
         fs::create_dir_all(&repo).map_err(|e| e.to_string())?;
     }
-    
+
     let _config = load_config();
     let apps = scan_apps().map_err(|e| e)?;
     let previous_entries = load_sync_manifest(&repo);
@@ -1639,7 +1690,7 @@ fn sync_to_git(repo_path: String) -> Result<(), String> {
     written_entries.sort();
     written_entries.dedup();
     save_sync_manifest(&repo, &written_entries)?;
-    
+
     Ok(())
 }
 
@@ -1675,7 +1726,10 @@ fn git_push(repo_path: String) -> Result<(), String> {
     ensure_repo_initialized(&repo, &app_config.git_config)?;
     sync_to_git(repo_path.clone())?;
     let _ = commit_repo_changes(&repo)?;
-    run_git(&repo, &["push", "-u", "origin", app_config.git_config.branch.trim()])?;
+    run_git(
+        &repo,
+        &["push", "-u", "origin", app_config.git_config.branch.trim()],
+    )?;
     Ok(())
 }
 
@@ -1689,7 +1743,15 @@ fn git_pull(repo_path: String) -> Result<String, String> {
     let repo = PathBuf::from(&repo_path);
     ensure_repo_initialized(&repo, &app_config.git_config)?;
     let stashed = stash_local_changes_if_needed(&repo, "pull")?;
-    run_git(&repo, &["pull", "--rebase", "origin", app_config.git_config.branch.trim()])?;
+    run_git(
+        &repo,
+        &[
+            "pull",
+            "--rebase",
+            "origin",
+            app_config.git_config.branch.trim(),
+        ],
+    )?;
     Ok(if stashed {
         "已暂存本地未提交改动，并从远程仓库恢复最新 skills".to_string()
     } else {
@@ -1708,10 +1770,21 @@ fn git_sync(repo_path: String) -> Result<String, String> {
     ensure_repo_initialized(&repo, &app_config.git_config)?;
 
     let stashed = stash_local_changes_if_needed(&repo, "sync")?;
-    run_git(&repo, &["pull", "--rebase", "origin", app_config.git_config.branch.trim()])?;
+    run_git(
+        &repo,
+        &[
+            "pull",
+            "--rebase",
+            "origin",
+            app_config.git_config.branch.trim(),
+        ],
+    )?;
     sync_to_git(repo_path.clone())?;
     let _ = commit_repo_changes(&repo)?;
-    run_git(&repo, &["push", "-u", "origin", app_config.git_config.branch.trim()])?;
+    run_git(
+        &repo,
+        &["push", "-u", "origin", app_config.git_config.branch.trim()],
+    )?;
     Ok(if stashed {
         "已暂存本地未提交改动，完成拉取、同步并推送到远程仓库".to_string()
     } else {
@@ -1775,15 +1848,17 @@ fn unlink_app(app_id: String) -> Result<(), String> {
     if skill_dir.exists() {
         if let Ok(metadata) = fs::symlink_metadata(&skill_dir) {
             if metadata.file_type().is_symlink() {
-                fs::remove_file(&skill_dir).or_else(|_| fs::remove_dir(&skill_dir)).map_err(|e| e.to_string())?;
+                fs::remove_file(&skill_dir)
+                    .or_else(|_| fs::remove_dir(&skill_dir))
+                    .map_err(|e| e.to_string())?;
             }
         }
     }
-    
+
     if backup_dir.exists() {
         fs::rename(&backup_dir, &skill_dir).map_err(|e| e.to_string())?;
     }
-    
+
     Ok(())
 }
 
@@ -1810,28 +1885,41 @@ fn get_version() -> String {
 }
 
 #[tauri::command]
-async fn figma_get_file(file_key: String, api_key: Option<String>) -> Result<FigmaFileData, String> {
+async fn figma_get_file(
+    file_key: String,
+    api_key: Option<String>,
+) -> Result<FigmaFileData, String> {
     let key = api_key.ok_or("Figma API key is required")?;
     let client = FigmaClient::new(key);
     client.get_file(&file_key).await
 }
 
 #[tauri::command]
-async fn figma_get_file_info(file_key: String, api_key: Option<String>) -> Result<FigmaFile, String> {
+async fn figma_get_file_info(
+    file_key: String,
+    api_key: Option<String>,
+) -> Result<FigmaFile, String> {
     let key = api_key.ok_or("Figma API key is required")?;
     let client = FigmaClient::new(key);
     client.get_file_info(&file_key).await
 }
 
 #[tauri::command]
-async fn figma_get_images(file_key: String, node_ids: Vec<String>, api_key: Option<String>) -> Result<std::collections::HashMap<String, String>, String> {
+async fn figma_get_images(
+    file_key: String,
+    node_ids: Vec<String>,
+    api_key: Option<String>,
+) -> Result<std::collections::HashMap<String, String>, String> {
     let key = api_key.ok_or("Figma API key is required")?;
     let client = FigmaClient::new(key);
     client.get_images(&file_key, &node_ids).await
 }
 
 #[tauri::command]
-async fn figma_get_comments(file_key: String, api_key: Option<String>) -> Result<Vec<FigmaComment>, String> {
+async fn figma_get_comments(
+    file_key: String,
+    api_key: Option<String>,
+) -> Result<Vec<FigmaComment>, String> {
     let key = api_key.ok_or("Figma API key is required")?;
     let client = FigmaClient::new(key);
     client.get_comments(&file_key).await
@@ -1850,13 +1938,19 @@ fn figma_extract_css(file_data: FigmaFileData) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn figma_find_nodes(file_data: FigmaFileData, node_type: String) -> Result<Vec<figma::FigmaNode>, String> {
+fn figma_find_nodes(
+    file_data: FigmaFileData,
+    node_type: String,
+) -> Result<Vec<figma::FigmaNode>, String> {
     let nodes = find_nodes_by_type(&file_data.document, &node_type);
     Ok(nodes)
 }
 
 #[tauri::command]
-fn figma_find_nodes_by_name(file_data: FigmaFileData, name_pattern: String) -> Result<Vec<figma::FigmaNode>, String> {
+fn figma_find_nodes_by_name(
+    file_data: FigmaFileData,
+    name_pattern: String,
+) -> Result<Vec<figma::FigmaNode>, String> {
     let nodes = find_nodes_by_name(&file_data.document, &name_pattern);
     Ok(nodes)
 }

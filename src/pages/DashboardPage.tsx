@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { Link } from 'react-router-dom'
 import { open as openDialog } from '@tauri-apps/api/dialog'
 import { Archive, FolderOpen, FolderPlus, Scan, Search, Settings } from 'lucide-react'
@@ -32,6 +33,12 @@ import type { AppRecord, GitSyncConfig, SkillRecord } from '../types'
 
 type TabKey = 'applications' | 'skills'
 type GitBusyAction = 'saveConfig' | 'push' | 'pull' | 'sync' | 'aggregate' | 'pickPath' | 'changePath' | null
+
+function waitForNextPaint() {
+  return new Promise<void>((resolve) => {
+    requestAnimationFrame(() => resolve())
+  })
+}
 
 export default function DashboardPage() {
   const { notify } = useToast()
@@ -185,7 +192,8 @@ export default function DashboardPage() {
       return
     }
 
-    setGitBusyAction('aggregate')
+    flushSync(() => setGitBusyAction('aggregate'))
+    await waitForNextPaint()
     try {
       await syncToGit(gitPath)
       await refreshData()
@@ -202,7 +210,8 @@ export default function DashboardPage() {
       return
     }
 
-    setGitBusyAction('pickPath')
+    flushSync(() => setGitBusyAction('pickPath'))
+    await waitForNextPaint()
     const selected = await openDialog({
       directory: true,
       multiple: false,
@@ -222,7 +231,8 @@ export default function DashboardPage() {
       return
     }
 
-    setGitBusyAction('changePath')
+    flushSync(() => setGitBusyAction('changePath'))
+    await waitForNextPaint()
     try {
       await saveGitPath(pendingGitPath)
       await syncToGit(pendingGitPath)
@@ -244,7 +254,8 @@ export default function DashboardPage() {
       return
     }
 
-    setGitBusyAction('sync')
+    flushSync(() => setGitBusyAction('sync'))
+    await waitForNextPaint()
     try {
       const message = await gitSync(gitPath)
       await refreshData()
@@ -262,7 +273,8 @@ export default function DashboardPage() {
       return
     }
 
-    setGitBusyAction('push')
+    flushSync(() => setGitBusyAction('push'))
+    await waitForNextPaint()
     try {
       await gitPush(gitPath)
       await refreshData()
@@ -280,7 +292,8 @@ export default function DashboardPage() {
       return
     }
 
-    setGitBusyAction('pull')
+    flushSync(() => setGitBusyAction('pull'))
+    await waitForNextPaint()
     try {
       const message = await gitPull(gitPath)
       await refreshData()
@@ -297,7 +310,8 @@ export default function DashboardPage() {
       return
     }
 
-    setGitBusyAction('saveConfig')
+    flushSync(() => setGitBusyAction('saveConfig'))
+    await waitForNextPaint()
     try {
       await persistGitConfig(config)
       setGitConfig(config)

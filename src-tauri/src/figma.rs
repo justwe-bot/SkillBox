@@ -77,7 +77,7 @@ impl FigmaClient {
 
     pub async fn get_file(&self, file_key: &str) -> Result<FigmaFileData, String> {
         let url = format!("{}/files/{}?geometry=paths", FIGMA_API_BASE, file_key);
-        
+
         let response = self
             .client
             .get(&url)
@@ -102,7 +102,7 @@ impl FigmaClient {
 
     pub async fn get_file_info(&self, file_key: &str) -> Result<FigmaFile, String> {
         let url = format!("{}/files/{}", FIGMA_API_BASE, file_key);
-        
+
         let response = self
             .client
             .get(&url)
@@ -125,13 +125,17 @@ impl FigmaClient {
         Ok(data)
     }
 
-    pub async fn get_images(&self, file_key: &str, node_ids: &[String]) -> Result<HashMap<String, String>, String> {
+    pub async fn get_images(
+        &self,
+        file_key: &str,
+        node_ids: &[String],
+    ) -> Result<HashMap<String, String>, String> {
         let ids = node_ids.join(",");
         let url = format!(
             "{}/images/{}?ids={}&format=png&scale=2",
             FIGMA_API_BASE, file_key, ids
         );
-        
+
         let response = self
             .client
             .get(&url)
@@ -156,9 +160,7 @@ impl FigmaClient {
             .and_then(|v| v.as_object())
             .map(|obj| {
                 obj.iter()
-                    .filter_map(|(k, v)| {
-                        v.as_str().map(|url| (k.clone(), url.to_string()))
-                    })
+                    .filter_map(|(k, v)| v.as_str().map(|url| (k.clone(), url.to_string())))
                     .collect()
             })
             .unwrap_or_default();
@@ -168,7 +170,7 @@ impl FigmaClient {
 
     pub async fn get_comments(&self, file_key: &str) -> Result<Vec<FigmaComment>, String> {
         let url = format!("{}/files/{}/comments", FIGMA_API_BASE, file_key);
-        
+
         let response = self
             .client
             .get(&url)
@@ -199,7 +201,7 @@ impl FigmaClient {
 
 pub fn extract_design_tokens(node: &FigmaNode) -> Vec<DesignToken> {
     let mut tokens = Vec::new();
-    
+
     if let Some(fills) = node.properties.get("fills") {
         if let Some(fill_array) = fills.as_array() {
             for (i, fill) in fill_array.iter().enumerate() {
@@ -215,7 +217,7 @@ pub fn extract_design_tokens(node: &FigmaNode) -> Vec<DesignToken> {
             }
         }
     }
-    
+
     if let Some(style) = node.properties.get("style") {
         if let Some(font_family) = style.get("fontFamily") {
             tokens.push(DesignToken {
@@ -225,7 +227,7 @@ pub fn extract_design_tokens(node: &FigmaNode) -> Vec<DesignToken> {
                 description: None,
             });
         }
-        
+
         if let Some(font_size) = style.get("fontSize") {
             tokens.push(DesignToken {
                 name: format!("{}/font-size", node.name),
@@ -235,22 +237,22 @@ pub fn extract_design_tokens(node: &FigmaNode) -> Vec<DesignToken> {
             });
         }
     }
-    
+
     if let Some(children) = &node.children {
         for child in children {
             tokens.extend(extract_design_tokens(child));
         }
     }
-    
+
     tokens
 }
 
 pub fn extract_css_from_node(node: &FigmaNode) -> String {
     let mut css = String::new();
-    
+
     let selector = node.name.to_lowercase().replace(" ", "-").replace("/", "-");
     css.push_str(&format!(".{} {{\n", selector));
-    
+
     if let Some(absolute_bounding_box) = node.properties.get("absoluteBoundingBox") {
         if let Some(width) = absolute_bounding_box.get("width") {
             if let Some(w) = width.as_f64() {
@@ -263,7 +265,7 @@ pub fn extract_css_from_node(node: &FigmaNode) -> String {
             }
         }
     }
-    
+
     if let Some(fills) = node.properties.get("fills") {
         if let Some(fill_array) = fills.as_array() {
             if let Some(first_fill) = fill_array.first() {
@@ -272,7 +274,7 @@ pub fn extract_css_from_node(node: &FigmaNode) -> String {
                     let g = color.get("g").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let b = color.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let a = color.get("a").and_then(|v| v.as_f64()).unwrap_or(1.0);
-                    
+
                     if a < 1.0 {
                         css.push_str(&format!(
                             "  background-color: rgba({}, {}, {}, {:.2});\n",
@@ -293,7 +295,7 @@ pub fn extract_css_from_node(node: &FigmaNode) -> String {
             }
         }
     }
-    
+
     if let Some(style) = node.properties.get("style") {
         if let Some(font_family) = style.get("fontFamily") {
             if let Some(family) = font_family.as_str() {
@@ -311,46 +313,50 @@ pub fn extract_css_from_node(node: &FigmaNode) -> String {
             }
         }
     }
-    
+
     css.push_str("}\n\n");
-    
+
     if let Some(children) = &node.children {
         for child in children {
             css.push_str(&extract_css_from_node(child));
         }
     }
-    
+
     css
 }
 
 pub fn find_nodes_by_type(node: &FigmaNode, node_type: &str) -> Vec<FigmaNode> {
     let mut results = Vec::new();
-    
+
     if node.node_type == node_type {
         results.push(node.clone());
     }
-    
+
     if let Some(children) = &node.children {
         for child in children {
             results.extend(find_nodes_by_type(child, node_type));
         }
     }
-    
+
     results
 }
 
 pub fn find_nodes_by_name(node: &FigmaNode, name_pattern: &str) -> Vec<FigmaNode> {
     let mut results = Vec::new();
-    
-    if node.name.to_lowercase().contains(&name_pattern.to_lowercase()) {
+
+    if node
+        .name
+        .to_lowercase()
+        .contains(&name_pattern.to_lowercase())
+    {
         results.push(node.clone());
     }
-    
+
     if let Some(children) = &node.children {
         for child in children {
             results.extend(find_nodes_by_name(child, name_pattern));
         }
     }
-    
+
     results
 }

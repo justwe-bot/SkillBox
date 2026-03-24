@@ -1063,9 +1063,27 @@ a {
 }
 
 .git-panel__body {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.git-panel__overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--panel-raised) 82%, transparent);
+  backdrop-filter: blur(6px);
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 700;
 }
 
 .git-panel__row {

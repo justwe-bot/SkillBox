@@ -1,27 +1,54 @@
 # SkillBox Agent Notes
 
-## Project Stack
+## Project Overview
 
-- Frontend: Vue 3 + TypeScript + Pinia + Vite
-- Desktop shell: Tauri v1
-- Main UI entry: `src/App.vue`
-- Global styles: `src/styles/main.css`
+- SkillBox is a desktop tool for scanning, aggregating, linking, and syncing AI skill folders across multiple apps.
+- Frontend stack: React 19 + TypeScript + Vite + React Router.
+- Desktop shell: Tauri v1 with a Rust backend.
+- Main UI entry: `src/App.tsx`
+- Frontend bootstrap: `src/main.tsx`
+- Global styles and design tokens: `src/styles/main.css`
+- Main screens: `src/pages/DashboardPage.tsx` and `src/pages/SettingsPage.tsx`
+- Tauri command layer: `src/lib/tauri.ts`
+- Shared frontend types: `src/types.ts`
+- Rust backend commands: `src-tauri/src/main.rs`
+- Figma helper module: `src-tauri/src/figma.rs`
 
-## Figma MCP
+## Current App Behavior
 
-- The official remote Figma MCP server is already enabled globally in Codex as `figma`.
-- Authentication should use Codex-managed OAuth, not project files or checked-in tokens.
-- Do not store Figma personal access tokens, OAuth codes, or temporary keys in this repository.
+- Routing uses `HashRouter`.
+- The dashboard is the primary workspace for app discovery, skill inspection, Git sync, and link management.
+- Settings covers local storage paths, custom scan paths, theme, and user preferences.
+- User-facing copy is currently Chinese; preserve that tone unless a task explicitly asks for localization changes.
+- Theme and lightweight preferences are handled client-side; avoid introducing heavier state management unless the task clearly needs it.
+
+## Implementation Preferences
+
+- Prefer extending the existing React/Tauri app instead of rebuilding isolated demos or parallel prototypes.
+- Reuse the current page structure, modal patterns, toast flow, and shared components before introducing new abstractions.
+- Keep CSS variables centralized in `src/styles/main.css` when adding tokens or adjusting the visual system.
+- Preserve the existing `invoke` contracts in `src/lib/tauri.ts` unless a coordinated frontend and backend change is required.
+- If backend payload shapes change, update both the Rust commands and the corresponding TypeScript types together.
+- If documentation and code disagree, trust the live codebase first and update the docs as part of the change.
 
 ## Working From Figma / Figma Make
 
 - When the user shares a Figma file, frame, layer, or Make link, use the `figma` MCP server to fetch design context before editing code.
-- Prefer implementing the selected screen or component inside the existing Vue/Tauri app rather than rebuilding a disconnected demo.
-- Reuse the current structure in `src/App.vue` and `src/styles/main.css` unless the task clearly requires splitting components.
-- Keep text, spacing, hierarchy, and interaction behavior aligned with the linked design, but adapt details as needed for desktop usability.
+- Implement designs inside the existing React/Tauri app whenever possible.
+- Reuse `src/App.tsx`, the page components under `src/pages`, and `src/styles/main.css` unless the work clearly benefits from a new component split.
+- Keep spacing, hierarchy, and interaction behavior aligned with the design, but adapt details for desktop usability and the current product language.
+- Treat Figma Make output as reference material and normalize it to this codebase's patterns before merging.
 
-## Implementation Preferences
+## Figma Security
 
-- Preserve the existing app's simple state flow unless the design introduces a clear need for more structure.
-- Keep CSS variables centralized in `src/styles/main.css` when introducing new design tokens from Figma.
-- If Figma Make provides generated code or resources, treat them as reference material and normalize them to this codebase's patterns before merging.
+- The official remote Figma MCP server is available globally in Codex as `figma`.
+- Authentication should use Codex-managed OAuth when working through MCP.
+- Do not store Figma personal access tokens, OAuth codes, or temporary keys in this repository.
+- If a task touches local app-side Figma configuration, keep secrets in user-level app config only and never commit them.
+
+## Practical Editing Guidance
+
+- Prefer small, targeted updates over broad refactors.
+- Avoid changing unrelated files in a dirty worktree.
+- Keep new user-facing actions consistent with the existing dashboard and settings flows.
+- When adding new settings or commands, make sure the README and this file still reflect the real project structure.

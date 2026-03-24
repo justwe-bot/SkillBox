@@ -32,6 +32,16 @@ export function GitPanel({ gitPath, gitConfig, busyAction, onSaveConfig, onPush,
   const pushBusy = busyAction === 'push'
   const pullBusy = busyAction === 'pull'
   const syncBusy = busyAction === 'sync'
+  const busyLabel =
+    busyAction === 'saveConfig'
+      ? '正在保存配置...'
+      : busyAction === 'push'
+        ? '正在推送到远程仓库...'
+        : busyAction === 'pull'
+          ? '正在从远程仓库拉取...'
+          : busyAction === 'sync'
+            ? '正在同步...'
+            : '正在处理...'
 
   return (
     <section className="surface side-panel side-panel--git">
@@ -46,6 +56,13 @@ export function GitPanel({ gitPath, gitConfig, busyAction, onSaveConfig, onPush,
       </div>
 
       <div className="git-panel__body">
+        {gitBusy ? (
+          <div className="git-panel__overlay" aria-live="polite" aria-busy="true">
+            <RefreshCw size={20} className="spin" />
+            <span>{busyLabel}</span>
+          </div>
+        ) : null}
+
         <div className="field-group">
           <label htmlFor="git-path">仓库地址</label>
           <input

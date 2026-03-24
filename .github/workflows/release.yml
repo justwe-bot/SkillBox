@@ -82,6 +82,12 @@ jobs:
         with:
           path: release-artifacts
 
+      - name: Collect release files
+        run: |
+          mkdir -p release-files
+          find release-artifacts -type f \( -name '*.dmg' -o -name '*.tar.gz' -o -name '*-setup.exe' \) -exec cp {} release-files/ \;
+          ls -lah release-files
+
       - name: Publish GitHub Release assets
         uses: softprops/action-gh-release@v2
         with:
@@ -92,4 +98,4 @@ jobs:
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
-          files: release-artifacts/**/*
+          files: release-files/*

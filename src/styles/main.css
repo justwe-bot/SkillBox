@@ -684,51 +684,25 @@ a {
   width: 56px;
   height: 56px;
   color: #101633;
-  background: linear-gradient(135deg, #f8f9ff 0%, #eef1f8 100%);
+  background: linear-gradient(180deg, #ffffff 0%, #fbfbfd 100%);
   border-radius: var(--radius-md);
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.04);
+  overflow: hidden;
+  box-shadow:
+    inset 0 0 0 1px rgba(3, 2, 19, 0.06),
+    0 4px 14px rgba(3, 2, 19, 0.03);
 }
 
 .brand-icon svg {
-  width: 27px;
-  height: 27px;
+  width: 24px;
+  height: 24px;
 }
 
 .brand-icon__image {
-  width: 30px;
-  height: 30px;
+  width: 40px;
+  height: 40px;
   object-fit: contain;
   display: block;
-}
-
-.brand-icon__image--padded {
-  width: 34px;
-  height: 34px;
-}
-
-.brand-icon__image--codex {
-  width: 38px;
-  height: 38px;
-}
-
-.brand-icon__image--opencode {
-  width: 28px;
-  height: 28px;
-}
-
-.brand-icon__image--kiro {
-  width: 32px;
-  height: 32px;
-}
-
-.brand-icon__image--qoder {
-  width: 32px;
-  height: 32px;
-}
-
-.brand-icon__image--codebuddy {
-  width: 34px;
-  height: 34px;
+  flex: 0 0 auto;
 }
 
 .brand-icon--monogram {
@@ -740,26 +714,6 @@ a {
 
 .brand-icon--accent {
   color: #111633;
-}
-
-.brand-icon--continue {
-  background: linear-gradient(135deg, #f2fbf6 0%, #d9f5e7 100%);
-  color: #128b58;
-}
-
-.brand-icon--aider {
-  background: linear-gradient(135deg, #f6f6ff 0%, #ebe7ff 100%);
-  color: #6455d8;
-}
-
-.brand-icon--opencode {
-  background: linear-gradient(135deg, #eef4ff 0%, #dae5ff 100%);
-  color: #2c5bdb;
-}
-
-.brand-icon--openclaw {
-  background: linear-gradient(135deg, #fff7ef 0%, #ffe2c9 100%);
-  color: #cf6c1d;
 }
 
 .brand-icon--fallback {

@@ -242,9 +242,9 @@ fn build_macos_known_apps(home: &Path) -> Vec<KnownApp> {
             "Kiro",
             "🪄",
             vec![
+                home.join(".kiro/skills"),
                 home.join(".kiro/steering"),
-                home.join(".kiro/hooks"),
-                home.join(".kiro/agents"),
+                home.join(".kiro/powers"),
             ],
             vec![
                 PathBuf::from("/Applications/Kiro.app"),
@@ -422,9 +422,9 @@ fn build_windows_known_apps(home: &Path) -> Vec<KnownApp> {
             "Kiro",
             "🪄",
             vec![
+                home.join(".kiro/skills"),
                 home.join(".kiro/steering"),
-                home.join(".kiro/hooks"),
-                home.join(".kiro/agents"),
+                home.join(".kiro/powers"),
             ],
             vec![app_data.join("Kiro"), home.join(".kiro")],
         ),
@@ -589,9 +589,9 @@ fn build_linux_known_apps(home: &Path) -> Vec<KnownApp> {
             "Kiro",
             "🪄",
             vec![
+                home.join(".kiro/skills"),
                 home.join(".kiro/steering"),
-                home.join(".kiro/hooks"),
-                home.join(".kiro/agents"),
+                home.join(".kiro/powers"),
             ],
             vec![config_dir.join("Kiro"), home.join(".kiro")],
         ),
@@ -1097,6 +1097,28 @@ fn save_sync_manifest(repo_path: &Path, entries: &[String]) -> Result<(), String
     fs::write(manifest_path, content).map_err(|e| e.to_string())
 }
 
+fn get_skill_base_name(skill: &SkillFile) -> String {
+    let skill_path = PathBuf::from(&skill.path);
+    skill_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| {
+            let fallback = if skill.canonical_name.is_empty() {
+                normalize_skill_name(&skill.name)
+            } else {
+                skill.canonical_name.clone()
+            };
+
+            if skill_path.is_file() {
+                format!("{}.md", fallback)
+            } else {
+                fallback
+            }
+        })
+}
+
 fn make_flat_skill_name(
     skill: &SkillFile,
     app_id: &str,
@@ -1142,6 +1164,69 @@ fn make_flat_skill_name(
             format!("{}--{}-{}", stem, app_id, attempt)
         } else {
             format!("{}--{}-{}.{}", stem, app_id, attempt, extension)
+        };
+
+        if used_names.insert(candidate.clone()) {
+            return candidate;
+        }
+
+        attempt += 1;
+    }
+}
+
+fn make_conflict_skill_name(
+    skill: &SkillFile,
+    app_id: &str,
+    used_names: &mut std::collections::HashSet<String>,
+) -> String {
+    let skill_path = PathBuf::from(&skill.path);
+    let original_name = skill_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| {
+            let fallback = if skill.canonical_name.is_empty() {
+                normalize_skill_name(&skill.name)
+            } else {
+                skill.canonical_name.clone()
+            };
+
+            if skill_path.is_file() {
+                format!("{}.md", fallback)
+            } else {
+                fallback
+            }
+        });
+
+    let path = Path::new(&original_name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("skill");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+
+    // 使用 技能名-应用名 格式
+    let conflict_name = if extension.is_empty() {
+        format!("{}-{}", stem, app_id)
+    } else {
+        format!("{}-{}.{}", stem, app_id, extension)
+    };
+
+    if used_names.insert(conflict_name.clone()) {
+        return conflict_name;
+    }
+
+    // 如果连冲突名称都存在，添加数字后缀
+    let mut attempt = 1usize;
+    loop {
+        let candidate = if extension.is_empty() {
+            format!("{}-{}-{}", stem, app_id, attempt)
+        } else {
+            format!("{}-{}-{}.{}", stem, app_id, attempt, extension)
         };
 
         if used_names.insert(candidate.clone()) {
@@ -1655,10 +1740,21 @@ fn sync_to_git(repo_path: String) -> Result<(), String> {
                         continue;
                     }
 
-                    let flat_name = make_flat_skill_name(&skill, &app.id, &mut used_names);
-                    let target = repo.join(&flat_name);
-
                     let source_real = source.canonicalize().unwrap_or(source.clone());
+                    if source_real == repo_real || source_real.starts_with(&repo_real) {
+                        continue;
+                    }
+
+                    // 获取基础名称
+                    let base_name = get_skill_base_name(&skill);
+                    let flat_name = if used_names.contains(&base_name) {
+                        // 冲突：使用 技能名-应用名 格式
+                        make_conflict_skill_name(&skill, &app.id, &mut used_names)
+                    } else {
+                        make_flat_skill_name(&skill, &app.id, &mut used_names)
+                    };
+                    
+                    let target = repo.join(&flat_name);
                     let target_real = target.canonicalize().unwrap_or(target.clone());
                     if source_real == target_real {
                         continue;

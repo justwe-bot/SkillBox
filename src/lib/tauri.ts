@@ -3,6 +3,7 @@ import type {
   AppRecord,
   BackendApp,
   BackendSkillFile,
+  GitSyncConfig,
   ScanAppsResponse,
   SkillRecord,
 } from '../types'
@@ -16,6 +17,7 @@ function mapApp(app: BackendApp): AppRecord {
     skillCount: app.skill_count,
     isLinked: app.is_linked,
     isInstalled: app.is_installed,
+    isCustom: app.is_custom ?? false,
     backupPath: app.backup_path,
     customPath: app.custom_path,
   }
@@ -41,6 +43,14 @@ export function scanSkills(appId: string) {
   return invoke<BackendSkillFile[]>('scan_skills', { appId })
 }
 
+export function renameSkill(skillPath: string, newName: string) {
+  return invoke<string>('rename_skill', { skillPath, newName })
+}
+
+export function deleteSkill(skillPath: string) {
+  return invoke<void>('delete_skill', { skillPath })
+}
+
 export function linkApp(appId: string, gitPath: string) {
   return invoke<string>('link_app', { appId, gitPath })
 }
@@ -57,12 +67,40 @@ export function saveGitPath(path: string) {
   return invoke<void>('save_git_path', { path })
 }
 
+export function getGitConfig() {
+  return invoke<GitSyncConfig>('get_git_config')
+}
+
+export function saveGitConfig(config: GitSyncConfig) {
+  return invoke<void>('save_git_config', { config })
+}
+
+export function gitPush(repoPath: string) {
+  return invoke<void>('git_push', { repoPath })
+}
+
+export function gitPull(repoPath: string) {
+  return invoke<string>('git_pull', { repoPath })
+}
+
+export function gitSync(repoPath: string) {
+  return invoke<string>('git_sync', { repoPath })
+}
+
 export function addCustomApp(name: string, path: string) {
   return invoke<void>('add_custom_app', { name, path })
 }
 
 export function setCustomPath(appId: string, customPath: string | null) {
   return invoke<void>('set_custom_path', { appId, customPath })
+}
+
+export function openPathInFileManager(path: string) {
+  return invoke<void>('open_path_in_file_manager', { path })
+}
+
+export function launchApp(appId: string) {
+  return invoke<void>('launch_app', { appId })
 }
 
 export function getVersion() {

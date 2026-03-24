@@ -1,39 +1,92 @@
-import { FolderOpen } from 'lucide-react'
+import { Check, FolderOpen, PencilLine, Play } from 'lucide-react'
 import type { AppRecord } from '../types'
+import { AnimatedNumber } from './AnimatedNumber'
+import { AppBrandIcon } from './AppBrandIcon'
 
 interface ApplicationCardProps {
   app: AppRecord
+  totalSkillCount: number
   busy: boolean
   onToggleLink: (app: AppRecord) => void
+  onOpenFolder: (app: AppRecord) => void
+  onLaunchApp: (app: AppRecord) => void
   onEditPath: (app: AppRecord) => void
 }
 
-export function ApplicationCard({ app, busy, onToggleLink, onEditPath }: ApplicationCardProps) {
+export function ApplicationCard({
+  app,
+  totalSkillCount,
+  busy,
+  onToggleLink,
+  onOpenFolder,
+  onLaunchApp,
+  onEditPath,
+}: ApplicationCardProps) {
+  const displaySkillCount = app.isLinked ? totalSkillCount : app.skillCount
+
   return (
     <article className="surface card-app">
       <div className="card-app__header">
         <div className="card-app__identity">
           <div className="card-app__icon-wrap">
-            <span className="card-app__emoji-icon">{app.icon}</span>
+            <AppBrandIcon appId={app.id} appName={app.name} />
           </div>
-          <div>
-            <h3>{app.name}</h3>
-            <p className="muted ellipsis">{app.path}</p>
+          <div className="card-app__text">
+            <h3 className="card-app__title">{app.name}</h3>
+            <p className="card-app__path ellipsis">{app.path}</p>
           </div>
         </div>
-        <div className="card-app__badges">
-          {app.isInstalled ? (
-            <span className="badge badge--detected">已检测</span>
-          ) : (
-            <span className="badge badge--muted">未安装</span>
-          )}
+        <div className="card-app__header-tools">
+          <div className="card-app__hover-actions">
+            <button
+              className="button button--icon-ghost card-app__action"
+              type="button"
+              onClick={() => onOpenFolder(app)}
+              aria-label={`打开 ${app.name} 文件夹`}
+              title="打开文件夹"
+            >
+              <FolderOpen size={18} />
+            </button>
+            <button
+              className="button button--icon-ghost card-app__action"
+              type="button"
+              onClick={() => onLaunchApp(app)}
+              disabled={!app.isInstalled}
+              aria-label={`运行 ${app.name}`}
+              title="运行软件"
+            >
+              <Play size={18} />
+            </button>
+            <button
+              className="button button--icon-ghost card-app__action"
+              type="button"
+              onClick={() => onEditPath(app)}
+              aria-label={`修改 ${app.name} 路径`}
+              title="修改文件夹"
+            >
+              <PencilLine size={18} />
+            </button>
+          </div>
+          <div className="card-app__badges">
+            {app.isInstalled ? (
+              <span className="badge badge--detected">
+                <Check className="badge__icon" size={14} />
+                已检测
+              </span>
+            ) : (
+              <span className="badge badge--muted">未安装</span>
+            )}
+          </div>
         </div>
       </div>
 
       <div className="card-app__details">
         <div>
           <div className="card-app__count">
-            <span className="card-app__count-number">{app.skillCount}</span>
+            <AnimatedNumber
+              value={displaySkillCount}
+              className={`card-app__count-number ${app.isLinked ? 'card-app__count-number--linked' : ''}`}
+            />
             <span className="card-app__count-unit">个技能</span>
           </div>
         </div>
@@ -44,17 +97,21 @@ export function ApplicationCard({ app, busy, onToggleLink, onEditPath }: Applica
           disabled={busy || !app.isInstalled}
           aria-pressed={app.isLinked}
         >
-          <span className="switch-pill__label">{app.isLinked ? '已链接' : '未链接'}</span>
+          <span className={`switch-pill__label ${app.isLinked ? 'switch-pill__label--linked' : ''}`}>
+            {app.isLinked ? '已链接' : '未链接'}
+          </span>
           <span className="switch-pill__track">
             <span className="switch-pill__thumb" />
           </span>
         </button>
       </div>
 
-      <button className="button button--card button--full" type="button" onClick={() => onEditPath(app)}>
-        <FolderOpen size={18} />
-        选择路径加载技能
-      </button>
+      {app.isCustom ? (
+        <button className="button button--card button--full" type="button" onClick={() => onEditPath(app)}>
+          <FolderOpen size={18} />
+          选择路径加载技能
+        </button>
+      ) : null}
     </article>
   )
 }

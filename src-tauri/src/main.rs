@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use walkdir::{DirEntry, WalkDir};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +23,7 @@ struct SkillApp {
     skill_count: usize,
     is_linked: bool,
     is_installed: bool,
+    is_custom: bool,
     backup_path: Option<String>,
     custom_path: Option<String>,
 }
@@ -41,8 +43,21 @@ struct SkillFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AppConfig {
     git_path: Option<String>,
+    #[serde(default = "default_git_config")]
+    git_config: GitSyncConfig,
     custom_paths: std::collections::HashMap<String, String>,
     figma_api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitSyncConfig {
+    #[serde(default)]
+    repo_url: String,
+    #[serde(default)]
+    username: String,
+    #[serde(default = "default_git_branch")]
+    branch: String,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +74,8 @@ struct ParsedSkillMetadata {
     name: String,
     description: String,
 }
+
+const SYNC_MANIFEST_FILE: &str = ".skillbox-sync.json";
 
 fn build_known_apps() -> Vec<KnownApp> {
     let home = dirs::home_dir().unwrap_or_default();
@@ -97,7 +114,7 @@ fn build_known_apps() -> Vec<KnownApp> {
             id: "cline".to_string(),
             name: "Cline".to_string(),
             icon: "⚡".to_string(),
-            skill_paths: vec![home.join(".cline/skills")],
+            skill_paths: vec![home.join(".cline/skills"), home.join(".cline/rules")],
             install_markers: vec![home.join(".cline")],
         });
         apps.push(KnownApp {
@@ -105,6 +122,7 @@ fn build_known_apps() -> Vec<KnownApp> {
             name: "Cursor".to_string(),
             icon: "🎯".to_string(),
             skill_paths: vec![
+                home.join(".cursor/rules"),
                 home.join(".cursor/skills"),
                 app_support.join("Cursor/User/globalStorage/skills"),
             ],
@@ -119,13 +137,96 @@ fn build_known_apps() -> Vec<KnownApp> {
             name: "Windsurf".to_string(),
             icon: "🌊".to_string(),
             skill_paths: vec![
+                home.join(".windsurf/rules"),
                 home.join(".windsurf/skills"),
+                app_support.join("Codeium/windsurf/memories"),
                 app_support.join("Windsurf/User/globalStorage/skills"),
             ],
             install_markers: vec![
                 PathBuf::from("/Applications/Windsurf.app"),
                 app_support.join("Windsurf"),
+                app_support.join("Codeium"),
                 home.join(".windsurf"),
+            ],
+        });
+        apps.push(KnownApp {
+            id: "trae".to_string(),
+            name: "Trae".to_string(),
+            icon: "🧭".to_string(),
+            skill_paths: vec![
+                home.join(".trae/skills"),
+                home.join(".trae-cn/skills"),
+                home.join(".trae/rules"),
+                home.join(".trae-cn/rules"),
+                app_support.join("Trae/User/globalStorage"),
+                app_support.join("Trae CN/User/globalStorage"),
+            ],
+            install_markers: vec![
+                PathBuf::from("/Applications/Trae.app"),
+                PathBuf::from("/Applications/Trae CN.app"),
+                app_support.join("Trae"),
+                app_support.join("Trae CN"),
+                home.join(".trae"),
+                home.join(".trae-cn"),
+            ],
+        });
+        apps.push(KnownApp {
+            id: "kiro".to_string(),
+            name: "Kiro".to_string(),
+            icon: "🪄".to_string(),
+            skill_paths: vec![
+                home.join(".kiro/steering"),
+                home.join(".kiro/hooks"),
+                home.join(".kiro/agents"),
+            ],
+            install_markers: vec![
+                PathBuf::from("/Applications/Kiro.app"),
+                app_support.join("Kiro"),
+                home.join(".kiro"),
+            ],
+        });
+        apps.push(KnownApp {
+            id: "qoder".to_string(),
+            name: "Qoder".to_string(),
+            icon: "🧩".to_string(),
+            skill_paths: vec![
+                home.join(".qoder/commands"),
+                home.join(".qoder/agents"),
+                home.join(".qoder/rules"),
+            ],
+            install_markers: vec![
+                PathBuf::from("/Applications/Qoder.app"),
+                app_support.join("Qoder"),
+                home.join(".qoder"),
+            ],
+        });
+        apps.push(KnownApp {
+            id: "codebuddy".to_string(),
+            name: "CodeBuddy".to_string(),
+            icon: "🤝".to_string(),
+            skill_paths: vec![
+                home.join(".codebuddy/skills"),
+                home.join(".codebuddy/prompts"),
+            ],
+            install_markers: vec![
+                PathBuf::from("/Applications/CodeBuddy.app"),
+                app_support.join("CodeBuddy"),
+                home.join(".codebuddy"),
+                home.join("CodeBuddy"),
+            ],
+        });
+        apps.push(KnownApp {
+            id: "copilot".to_string(),
+            name: "GitHub Copilot".to_string(),
+            icon: "🧠".to_string(),
+            skill_paths: vec![
+                home.join(".copilot/copilot-instructions.md"),
+                home.join(".github/copilot-instructions.md"),
+                home.join(".github/instructions"),
+            ],
+            install_markers: vec![
+                home.join(".copilot"),
+                app_support.join("GitHub Copilot"),
             ],
         });
         apps.push(KnownApp {
@@ -153,8 +254,23 @@ fn build_known_apps() -> Vec<KnownApp> {
             id: "continue".to_string(),
             name: "Continue".to_string(),
             icon: "▶️".to_string(),
-            skill_paths: vec![home.join(".continue/skills")],
+            skill_paths: vec![
+                home.join(".continue/rules"),
+                home.join(".continue/prompts"),
+                home.join(".continue/checks"),
+                home.join(".continue/skills"),
+            ],
             install_markers: vec![home.join(".continue")],
+        });
+        apps.push(KnownApp {
+            id: "gemini".to_string(),
+            name: "Gemini CLI".to_string(),
+            icon: "✨".to_string(),
+            skill_paths: vec![
+                home.join(".gemini/commands"),
+                home.join(".gemini/GEMINI.md"),
+            ],
+            install_markers: vec![home.join(".gemini"), home.join(".gemini/settings.json")],
         });
     }
 
@@ -187,7 +303,7 @@ fn build_known_apps() -> Vec<KnownApp> {
             id: "cline".to_string(),
             name: "Cline".to_string(),
             icon: "⚡".to_string(),
-            skill_paths: vec![home.join(".cline/skills")],
+            skill_paths: vec![home.join(".cline/skills"), home.join(".cline/rules")],
             install_markers: vec![home.join(".cline")],
         });
         apps.push(KnownApp {
@@ -195,6 +311,7 @@ fn build_known_apps() -> Vec<KnownApp> {
             name: "Cursor".to_string(),
             icon: "🎯".to_string(),
             skill_paths: vec![
+                home.join(".cursor/rules"),
                 home.join(".cursor/skills"),
                 app_data.join("Cursor/User/globalStorage/skills"),
             ],
@@ -205,10 +322,91 @@ fn build_known_apps() -> Vec<KnownApp> {
             name: "Windsurf".to_string(),
             icon: "🌊".to_string(),
             skill_paths: vec![
+                home.join(".windsurf/rules"),
                 home.join(".windsurf/skills"),
+                app_data.join("Codeium/windsurf/memories"),
                 app_data.join("Windsurf/User/globalStorage/skills"),
             ],
-            install_markers: vec![app_data.join("Windsurf"), home.join(".windsurf")],
+            install_markers: vec![
+                app_data.join("Windsurf"),
+                app_data.join("Codeium"),
+                home.join(".windsurf"),
+            ],
+        });
+        apps.push(KnownApp {
+            id: "trae".to_string(),
+            name: "Trae".to_string(),
+            icon: "🧭".to_string(),
+            skill_paths: vec![
+                home.join(".trae/skills"),
+                home.join(".trae-cn/skills"),
+                home.join(".trae/rules"),
+                home.join(".trae-cn/rules"),
+                app_data.join("Trae/User/globalStorage"),
+                app_data.join("Trae CN/User/globalStorage"),
+            ],
+            install_markers: vec![
+                app_data.join("Trae"),
+                app_data.join("Trae CN"),
+                home.join(".trae"),
+                home.join(".trae-cn"),
+            ],
+        });
+        apps.push(KnownApp {
+            id: "kiro".to_string(),
+            name: "Kiro".to_string(),
+            icon: "🪄".to_string(),
+            skill_paths: vec![
+                home.join(".kiro/steering"),
+                home.join(".kiro/hooks"),
+                home.join(".kiro/agents"),
+            ],
+            install_markers: vec![
+                app_data.join("Kiro"),
+                home.join(".kiro"),
+            ],
+        });
+        apps.push(KnownApp {
+            id: "qoder".to_string(),
+            name: "Qoder".to_string(),
+            icon: "🧩".to_string(),
+            skill_paths: vec![
+                home.join(".qoder/commands"),
+                home.join(".qoder/agents"),
+                home.join(".qoder/rules"),
+            ],
+            install_markers: vec![
+                app_data.join("Qoder"),
+                home.join(".qoder"),
+            ],
+        });
+        apps.push(KnownApp {
+            id: "codebuddy".to_string(),
+            name: "CodeBuddy".to_string(),
+            icon: "🤝".to_string(),
+            skill_paths: vec![
+                home.join(".codebuddy/skills"),
+                home.join(".codebuddy/prompts"),
+            ],
+            install_markers: vec![
+                app_data.join("CodeBuddy"),
+                home.join(".codebuddy"),
+                home.join("CodeBuddy"),
+            ],
+        });
+        apps.push(KnownApp {
+            id: "copilot".to_string(),
+            name: "GitHub Copilot".to_string(),
+            icon: "🧠".to_string(),
+            skill_paths: vec![
+                home.join(".copilot/copilot-instructions.md"),
+                home.join(".github/copilot-instructions.md"),
+                home.join(".github/instructions"),
+            ],
+            install_markers: vec![
+                home.join(".copilot"),
+                app_data.join("GitHub Copilot"),
+            ],
         });
         apps.push(KnownApp {
             id: "claude".to_string(),
@@ -231,8 +429,23 @@ fn build_known_apps() -> Vec<KnownApp> {
             id: "continue".to_string(),
             name: "Continue".to_string(),
             icon: "▶️".to_string(),
-            skill_paths: vec![home.join(".continue/skills")],
+            skill_paths: vec![
+                home.join(".continue/rules"),
+                home.join(".continue/prompts"),
+                home.join(".continue/checks"),
+                home.join(".continue/skills"),
+            ],
             install_markers: vec![home.join(".continue")],
+        });
+        apps.push(KnownApp {
+            id: "gemini".to_string(),
+            name: "Gemini CLI".to_string(),
+            icon: "✨".to_string(),
+            skill_paths: vec![
+                home.join(".gemini/commands"),
+                home.join(".gemini/GEMINI.md"),
+            ],
+            install_markers: vec![home.join(".gemini"), home.join(".gemini/settings.json")],
         });
     }
 
@@ -265,7 +478,7 @@ fn build_known_apps() -> Vec<KnownApp> {
             id: "cline".to_string(),
             name: "Cline".to_string(),
             icon: "⚡".to_string(),
-            skill_paths: vec![home.join(".cline/skills")],
+            skill_paths: vec![home.join(".cline/skills"), home.join(".cline/rules")],
             install_markers: vec![home.join(".cline")],
         });
         apps.push(KnownApp {
@@ -273,6 +486,7 @@ fn build_known_apps() -> Vec<KnownApp> {
             name: "Cursor".to_string(),
             icon: "🎯".to_string(),
             skill_paths: vec![
+                home.join(".cursor/rules"),
                 home.join(".cursor/skills"),
                 config_dir.join("Cursor/User/globalStorage/skills"),
             ],
@@ -283,10 +497,91 @@ fn build_known_apps() -> Vec<KnownApp> {
             name: "Windsurf".to_string(),
             icon: "🌊".to_string(),
             skill_paths: vec![
+                home.join(".windsurf/rules"),
                 home.join(".windsurf/skills"),
+                config_dir.join("Codeium/windsurf/memories"),
                 config_dir.join("Windsurf/User/globalStorage/skills"),
             ],
-            install_markers: vec![config_dir.join("Windsurf"), home.join(".windsurf")],
+            install_markers: vec![
+                config_dir.join("Windsurf"),
+                config_dir.join("Codeium"),
+                home.join(".windsurf"),
+            ],
+        });
+        apps.push(KnownApp {
+            id: "trae".to_string(),
+            name: "Trae".to_string(),
+            icon: "🧭".to_string(),
+            skill_paths: vec![
+                home.join(".trae/skills"),
+                home.join(".trae-cn/skills"),
+                home.join(".trae/rules"),
+                home.join(".trae-cn/rules"),
+                config_dir.join("Trae/User/globalStorage"),
+                config_dir.join("Trae CN/User/globalStorage"),
+            ],
+            install_markers: vec![
+                config_dir.join("Trae"),
+                config_dir.join("Trae CN"),
+                home.join(".trae"),
+                home.join(".trae-cn"),
+            ],
+        });
+        apps.push(KnownApp {
+            id: "kiro".to_string(),
+            name: "Kiro".to_string(),
+            icon: "🪄".to_string(),
+            skill_paths: vec![
+                home.join(".kiro/steering"),
+                home.join(".kiro/hooks"),
+                home.join(".kiro/agents"),
+            ],
+            install_markers: vec![
+                config_dir.join("Kiro"),
+                home.join(".kiro"),
+            ],
+        });
+        apps.push(KnownApp {
+            id: "qoder".to_string(),
+            name: "Qoder".to_string(),
+            icon: "🧩".to_string(),
+            skill_paths: vec![
+                home.join(".qoder/commands"),
+                home.join(".qoder/agents"),
+                home.join(".qoder/rules"),
+            ],
+            install_markers: vec![
+                config_dir.join("Qoder"),
+                home.join(".qoder"),
+            ],
+        });
+        apps.push(KnownApp {
+            id: "codebuddy".to_string(),
+            name: "CodeBuddy".to_string(),
+            icon: "🤝".to_string(),
+            skill_paths: vec![
+                home.join(".codebuddy/skills"),
+                home.join(".codebuddy/prompts"),
+            ],
+            install_markers: vec![
+                config_dir.join("CodeBuddy"),
+                home.join(".codebuddy"),
+                home.join("CodeBuddy"),
+            ],
+        });
+        apps.push(KnownApp {
+            id: "copilot".to_string(),
+            name: "GitHub Copilot".to_string(),
+            icon: "🧠".to_string(),
+            skill_paths: vec![
+                home.join(".copilot/copilot-instructions.md"),
+                home.join(".github/copilot-instructions.md"),
+                home.join(".github/instructions"),
+            ],
+            install_markers: vec![
+                home.join(".copilot"),
+                config_dir.join("GitHub Copilot"),
+            ],
         });
         apps.push(KnownApp {
             id: "claude".to_string(),
@@ -309,8 +604,23 @@ fn build_known_apps() -> Vec<KnownApp> {
             id: "continue".to_string(),
             name: "Continue".to_string(),
             icon: "▶️".to_string(),
-            skill_paths: vec![home.join(".continue/skills")],
+            skill_paths: vec![
+                home.join(".continue/rules"),
+                home.join(".continue/prompts"),
+                home.join(".continue/checks"),
+                home.join(".continue/skills"),
+            ],
             install_markers: vec![home.join(".continue")],
+        });
+        apps.push(KnownApp {
+            id: "gemini".to_string(),
+            name: "Gemini CLI".to_string(),
+            icon: "✨".to_string(),
+            skill_paths: vec![
+                home.join(".gemini/commands"),
+                home.join(".gemini/GEMINI.md"),
+            ],
+            install_markers: vec![home.join(".gemini"), home.join(".gemini/settings.json")],
         });
     }
 
@@ -327,6 +637,48 @@ fn should_skip_walk_entry(entry: &DirEntry) -> bool {
         name.as_ref(),
         ".git" | "node_modules" | "target" | "__pycache__" | ".DS_Store"
     )
+}
+
+fn is_instruction_markdown(file_name: &str, parent_name: Option<&str>) -> bool {
+    let lower_name = file_name.to_ascii_lowercase();
+    if matches!(
+        lower_name.as_str(),
+        "skill.md" | "agents.md" | "claude.md" | "gemini.md" | "copilot-instructions.md"
+    ) {
+        return true;
+    }
+
+    if lower_name.ends_with(".instructions.md") || lower_name.ends_with(".prompt.md") {
+        return true;
+    }
+
+    let parent = parent_name.unwrap_or_default().to_ascii_lowercase();
+    lower_name.ends_with(".md")
+        && matches!(
+            parent.as_str(),
+            "rules" | "prompts" | "checks" | "instructions" | "memories"
+        )
+}
+
+fn is_supported_instruction_file(path: &Path) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let parent_name = path
+        .parent()
+        .and_then(|value| value.file_name())
+        .and_then(|value| value.to_str());
+
+    if is_instruction_markdown(file_name, parent_name) {
+        return true;
+    }
+
+    match path.extension().and_then(|value| value.to_str()) {
+        Some("skill") | Some("mdc") => true,
+        Some("toml") => matches!(parent_name, Some("commands")),
+        _ => false,
+    }
 }
 
 fn normalize_skill_name(value: &str) -> String {
@@ -371,6 +723,23 @@ fn parse_skill_metadata(content: &str, fallback_name: &str) -> ParsedSkillMetada
                 match key.trim() {
                     "name" if !value.is_empty() => name = Some(value.to_string()),
                     "description" if !value.is_empty() => description = Some(value.to_string()),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if name.is_none() || description.is_none() {
+        for line in content.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                let value = value.trim().trim_matches('"').trim_matches('\'');
+                match key.trim() {
+                    "name" if name.is_none() && !value.is_empty() => {
+                        name = Some(value.to_string());
+                    }
+                    "description" if description.is_none() && !value.is_empty() => {
+                        description = Some(value.to_string());
+                    }
                     _ => {}
                 }
             }
@@ -463,12 +832,43 @@ fn inspect_skill_target(path: &Path) -> Result<(u64, String, usize, String), Str
 }
 
 fn collect_skill_entries(path: &Path) -> Result<Vec<SkillFile>, String> {
-    if !path.exists() || !path.is_dir() {
+    if !path.exists() {
         return Ok(vec![]);
     }
 
     let mut seen_paths = HashSet::new();
     let mut skills = Vec::new();
+
+    if path.is_file() {
+        if !is_supported_instruction_file(path) {
+            return Ok(vec![]);
+        }
+
+        let fallback_name = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let content = fs::read_to_string(path).unwrap_or_default();
+        let metadata = parse_skill_metadata(&content, &fallback_name);
+        let canonical_name = normalize_skill_name(&metadata.name);
+        let (size, modified, file_count, content_hash) = inspect_skill_target(path)?;
+
+        return Ok(vec![SkillFile {
+            name: metadata.name,
+            path: path.to_string_lossy().to_string(),
+            size,
+            modified,
+            description: metadata.description,
+            canonical_name: if canonical_name.is_empty() {
+                normalize_skill_name(&fallback_name)
+            } else {
+                canonical_name
+            },
+            content_hash,
+            file_count,
+        }]);
+    }
 
     for entry in WalkDir::new(path)
         .sort_by_file_name()
@@ -482,15 +882,9 @@ fn collect_skill_entries(path: &Path) -> Result<Vec<SkillFile>, String> {
         }
 
         let file_name = entry.file_name().to_string_lossy().to_string();
-        let is_skill_markdown = file_name == "SKILL.md";
-        let is_skill_file = entry
-            .path()
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(|value| value.eq_ignore_ascii_case("skill"))
-            .unwrap_or(false);
+        let is_skill_markdown = file_name.eq_ignore_ascii_case("SKILL.md");
 
-        if !is_skill_markdown && !is_skill_file {
+        if !is_supported_instruction_file(entry.path()) {
             continue;
         }
 
@@ -566,6 +960,18 @@ fn get_config_path() -> PathBuf {
     config_dir.join("skillbox")
 }
 
+fn default_git_branch() -> String {
+    "main".to_string()
+}
+
+fn default_git_config() -> GitSyncConfig {
+    GitSyncConfig {
+        repo_url: String::new(),
+        username: String::new(),
+        branch: default_git_branch(),
+    }
+}
+
 fn load_config() -> AppConfig {
     let config_path = get_config_path().join("config.json");
     if config_path.exists() {
@@ -577,6 +983,7 @@ fn load_config() -> AppConfig {
     }
     AppConfig { 
         git_path: None,
+        git_config: default_git_config(),
         custom_paths: std::collections::HashMap::new(),
         figma_api_key: None,
     }
@@ -591,22 +998,401 @@ fn save_config(config: &AppConfig) -> Result<(), String> {
     Ok(())
 }
 
-fn check_link_status(path: &str) -> (bool, Option<String>) {
-    let path_obj = PathBuf::from(path);
-    if path_obj.exists() {
-        if let Ok(metadata) = fs::symlink_metadata(&path_obj) {
-            if metadata.file_type().is_symlink() {
-                return (true, None);
+fn run_git(repo_path: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run git {}: {}", args.join(" "), e))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let message = if stderr.is_empty() { stdout } else { stderr };
+        Err(format!("git {} failed: {}", args.join(" "), message))
+    }
+}
+
+fn copy_path_recursive(source: &Path, target: &Path) -> Result<(), String> {
+    if source.is_dir() {
+        fs::create_dir_all(target).map_err(|e| e.to_string())?;
+
+        for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let child_source = entry.path();
+            let child_target = target.join(entry.file_name());
+            copy_path_recursive(&child_source, &child_target)?;
+        }
+
+        Ok(())
+    } else {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+
+        fs::copy(source, target).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+fn load_sync_manifest(repo_path: &Path) -> Vec<String> {
+    let manifest_path = repo_path.join(SYNC_MANIFEST_FILE);
+    if !manifest_path.exists() {
+        return Vec::new();
+    }
+
+    fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<Vec<String>>(&content).ok())
+        .unwrap_or_default()
+}
+
+fn save_sync_manifest(repo_path: &Path, entries: &[String]) -> Result<(), String> {
+    let manifest_path = repo_path.join(SYNC_MANIFEST_FILE);
+    let content = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
+    fs::write(manifest_path, content).map_err(|e| e.to_string())
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if metadata.file_type().is_symlink() {
+        return fs::remove_file(path)
+            .or_else(|_| fs::remove_dir(path))
+            .map_err(|e| e.to_string());
+    }
+
+    if metadata.is_dir() {
+        fs::remove_dir_all(path).map_err(|e| e.to_string())
+    } else {
+        fs::remove_file(path).map_err(|e| e.to_string())
+    }
+}
+
+fn make_flat_skill_name(skill: &SkillFile, app_id: &str, used_names: &mut std::collections::HashSet<String>) -> String {
+    let skill_path = PathBuf::from(&skill.path);
+    let original_name = skill_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| {
+            let fallback = if skill.canonical_name.is_empty() {
+                normalize_skill_name(&skill.name)
+            } else {
+                skill.canonical_name.clone()
+            };
+
+            if skill_path.is_file() {
+                format!("{}.md", fallback)
+            } else {
+                fallback
+            }
+        });
+
+    if used_names.insert(original_name.clone()) {
+        return original_name;
+    }
+
+    let path = Path::new(&original_name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("skill");
+    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or_default();
+
+    let mut attempt = 1usize;
+    loop {
+        let candidate = if extension.is_empty() {
+            format!("{}--{}-{}", stem, app_id, attempt)
+        } else {
+            format!("{}--{}-{}.{}", stem, app_id, attempt, extension)
+        };
+
+        if used_names.insert(candidate.clone()) {
+            return candidate;
+        }
+
+        attempt += 1;
+    }
+}
+
+fn is_directory_empty(path: &Path) -> Result<bool, String> {
+    Ok(fs::read_dir(path)
+        .map_err(|e| e.to_string())?
+        .next()
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .is_none())
+}
+
+fn ensure_repo_initialized(repo_path: &Path, git_config: &GitSyncConfig) -> Result<(), String> {
+    if !repo_path.exists() {
+        fs::create_dir_all(repo_path).map_err(|e| e.to_string())?;
+    }
+
+    let git_dir = repo_path.join(".git");
+    if !git_dir.exists() {
+        let repo_url = git_config.repo_url.trim();
+        let branch = git_config.branch.trim();
+
+        if !repo_url.is_empty() && is_directory_empty(repo_path)? {
+            let parent = repo_path
+                .parent()
+                .ok_or_else(|| "Unable to resolve repository parent directory".to_string())?;
+            let repo_name = repo_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| "Unable to resolve repository directory name".to_string())?;
+
+            let mut clone_args = vec!["clone"];
+            if !branch.is_empty() {
+                clone_args.push("--branch");
+                clone_args.push(branch);
+            }
+            clone_args.push(repo_url);
+            clone_args.push(repo_name);
+
+            if let Err(error) = run_git(parent, &clone_args) {
+                let missing_branch = error.contains("Remote branch")
+                    && error.contains("not found");
+
+                if missing_branch {
+                    run_git(parent, &["clone", repo_url, repo_name])?;
+                } else {
+                    return Err(error);
+                }
+            }
+        } else {
+            if !branch.is_empty() {
+                let _ = run_git(repo_path, &["init", "-b", branch]);
+            }
+
+            if !git_dir.exists() {
+                run_git(repo_path, &["init"])?;
             }
         }
     }
 
-    let backup_path = format!("{}_backup", path);
-    if PathBuf::from(&backup_path).exists() {
-        return (false, Some(backup_path));
+    if !repo_path.join(".git").exists() {
+        return Err("Local sync directory is not a git repository".to_string());
+    }
+
+    if !git_config.username.trim().is_empty() {
+        let _ = run_git(repo_path, &["config", "user.name", git_config.username.trim()]);
+    }
+
+    if !git_config.repo_url.trim().is_empty() {
+        let remote_exists = run_git(repo_path, &["remote", "get-url", "origin"]).is_ok();
+        if remote_exists {
+            run_git(repo_path, &["remote", "set-url", "origin", git_config.repo_url.trim()])?;
+        } else {
+            run_git(repo_path, &["remote", "add", "origin", git_config.repo_url.trim()])?;
+        }
+    }
+
+    if !git_config.branch.trim().is_empty() {
+        let _ = run_git(repo_path, &["checkout", "-B", git_config.branch.trim()]);
+    }
+
+    Ok(())
+}
+
+fn commit_repo_changes(repo_path: &Path) -> Result<bool, String> {
+    run_git(repo_path, &["add", "."])?;
+
+    let status = Command::new("git")
+        .args(["diff", "--cached", "--quiet"])
+        .current_dir(repo_path)
+        .status()
+        .map_err(|e| format!("Failed to run git diff --cached --quiet: {}", e))?;
+
+    if status.success() {
+        return Ok(false);
+    }
+
+    run_git(repo_path, &["commit", "-m", "Sync AI skills"])?;
+    Ok(true)
+}
+
+fn repo_has_local_changes(repo_path: &Path) -> Result<bool, String> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run git status --porcelain: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "git status --porcelain failed".to_string()
+        } else {
+            format!("git status --porcelain failed: {}", stderr)
+        });
+    }
+
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
+fn stash_local_changes_if_needed(repo_path: &Path, label: &str) -> Result<bool, String> {
+    if !repo_has_local_changes(repo_path)? {
+        return Ok(false);
+    }
+
+    let stash_name = format!("skillbox-auto-stash-{}", label);
+    run_git(repo_path, &["stash", "push", "--include-untracked", "-m", &stash_name])?;
+    Ok(true)
+}
+
+fn check_link_status(path: &str) -> (bool, Option<String>) {
+    let path_obj = PathBuf::from(path);
+    if let Ok(metadata) = fs::symlink_metadata(&path_obj) {
+        if metadata.file_type().is_symlink() {
+            return (true, None);
+        }
+    }
+
+    let backup_path = get_backup_path(&path_obj);
+    if backup_path.exists() {
+        return (false, Some(backup_path.to_string_lossy().to_string()));
     }
 
     (false, None)
+}
+
+fn get_backup_path(path: &Path) -> PathBuf {
+    let backup_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| {
+            if value.eq_ignore_ascii_case("skills") {
+                return "skill_backup".to_string();
+            }
+
+            match (
+                Path::new(value).file_stem().and_then(|item| item.to_str()),
+                Path::new(value).extension().and_then(|item| item.to_str()),
+            ) {
+                (Some(stem), Some(extension)) if !stem.is_empty() && !extension.is_empty() => {
+                    format!("{}_backup.{}", stem, extension)
+                }
+                _ => format!("{}_backup", value),
+            }
+        })
+        .unwrap_or_else(|| "skill_backup".to_string());
+
+    match path.parent() {
+        Some(parent) => parent.join(backup_name),
+        None => PathBuf::from(backup_name),
+    }
+}
+
+fn sanitize_skill_name(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("Skill name cannot be empty".to_string());
+    }
+
+    if trimmed
+        .chars()
+        .any(|ch| matches!(ch, '/' | '\\' | ':' | '\0'))
+    {
+        return Err("Skill name contains unsupported characters".to_string());
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn open_system_target(target: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(target);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", ""]);
+        command.arg(target);
+        command
+    };
+
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(target);
+        command
+    };
+
+    let status = command
+        .status()
+        .map_err(|error| format!("Failed to open {}: {}", target.display(), error))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Failed to open {}", target.display()))
+    }
+}
+
+#[tauri::command]
+fn open_path_in_file_manager(path: String) -> Result<(), String> {
+    let target = PathBuf::from(&path);
+    if !target.exists() {
+        return Err(format!("Path does not exist: {}", path));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let metadata = fs::symlink_metadata(&target).map_err(|error| {
+            format!("Failed to inspect {}: {}", target.display(), error)
+        })?;
+
+        if metadata.file_type().is_symlink() {
+            let status = Command::new("open")
+                .args(["-R"])
+                .arg(&target)
+                .status()
+                .map_err(|error| format!("Failed to reveal {}: {}", target.display(), error))?;
+
+            if status.success() {
+                return Ok(());
+            }
+
+            return Err(format!("Failed to reveal {}", target.display()));
+        }
+    }
+
+    open_system_target(&target)
+}
+
+#[tauri::command]
+fn launch_app(app_id: String) -> Result<(), String> {
+    let app = find_known_app(&app_id).ok_or_else(|| format!("App {} not found", app_id))?;
+
+    let target = app
+        .install_markers
+        .iter()
+        .find(|path| {
+            path.exists()
+                && (path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .map(|value| value.eq_ignore_ascii_case("app"))
+                    .unwrap_or(false)
+                    || path.is_file())
+        })
+        .cloned()
+        .ok_or_else(|| format!("No launchable application bundle found for {}", app.name))?;
+
+    open_system_target(&target)
 }
 
 #[tauri::command]
@@ -638,6 +1424,7 @@ fn scan_apps() -> Result<(Vec<SkillApp>, String), String> {
             skill_count,
             is_linked,
             is_installed,
+            is_custom: false,
             backup_path,
             custom_path,
         });
@@ -659,6 +1446,7 @@ fn scan_apps() -> Result<(Vec<SkillApp>, String), String> {
                 skill_count,
                 is_linked,
                 is_installed,
+                is_custom: true,
                 backup_path,
                 custom_path: Some(custom_path.clone()),
             });
@@ -686,6 +1474,66 @@ fn scan_skills(app_id: String) -> Result<Vec<SkillFile>, String> {
     let config = load_config();
     let path = resolve_skill_path(&app_id, &config)?;
     collect_skill_entries(Path::new(&path))
+}
+
+#[tauri::command]
+fn rename_skill(skill_path: String, new_name: String) -> Result<String, String> {
+    let source = PathBuf::from(&skill_path);
+    if !source.exists() {
+        return Err(format!("Skill path does not exist: {}", skill_path));
+    }
+
+    let safe_name = sanitize_skill_name(&new_name)?;
+    let parent = source
+        .parent()
+        .ok_or_else(|| "Unable to resolve parent directory".to_string())?;
+
+    let target = if source.is_dir() {
+        parent.join(&safe_name)
+    } else {
+        let extension = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+
+        if extension.is_empty() {
+            parent.join(&safe_name)
+        } else {
+            parent.join(format!("{}.{}", safe_name, extension))
+        }
+    };
+
+    if target == source {
+        return Ok(skill_path);
+    }
+
+    if target.exists() {
+        return Err(format!("Target already exists: {}", target.to_string_lossy()));
+    }
+
+    fs::rename(&source, &target).map_err(|e| e.to_string())?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn delete_skill(skill_path: String) -> Result<(), String> {
+    let target = PathBuf::from(&skill_path);
+    if !target.exists() {
+        return Err(format!("Skill path does not exist: {}", skill_path));
+    }
+
+    let metadata = fs::symlink_metadata(&target).map_err(|e| e.to_string())?;
+    if metadata.file_type().is_symlink() {
+        return fs::remove_file(&target)
+            .or_else(|_| fs::remove_dir(&target))
+            .map_err(|e| e.to_string());
+    }
+
+    if metadata.is_dir() {
+        fs::remove_dir_all(&target).map_err(|e| e.to_string())
+    } else {
+        fs::remove_file(&target).map_err(|e| e.to_string())
+    }
 }
 
 #[tauri::command]
@@ -726,56 +1574,194 @@ fn sync_to_git(repo_path: String) -> Result<(), String> {
     
     let _config = load_config();
     let apps = scan_apps().map_err(|e| e)?;
-    
+    let previous_entries = load_sync_manifest(&repo);
+    for entry in previous_entries {
+        remove_path_if_exists(&repo.join(entry))?;
+    }
+
+    for app in build_known_apps() {
+        let legacy_dir = repo.join(&app.id);
+        if legacy_dir.exists() {
+            remove_path_if_exists(&legacy_dir)?;
+        }
+    }
+
+    let mut written_entries = Vec::new();
+    let mut used_names = std::collections::HashSet::new();
+    let repo_real = repo.canonicalize().unwrap_or(repo.clone());
+    let mut seen_skill_dirs = std::collections::HashSet::new();
+    if let Ok(existing_entries) = fs::read_dir(&repo) {
+        for entry in existing_entries.filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name != ".git" && name != SYNC_MANIFEST_FILE {
+                used_names.insert(name);
+            }
+        }
+    }
+
     for app in apps.0 {
         if app.is_installed || app.is_linked {
-            let target_dir = repo.join(&app.id);
-            fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
-            
             let skill_dir = PathBuf::from(&app.path);
-            if skill_dir.exists() && skill_dir.is_dir() {
-                if let Ok(entries) = fs::read_dir(&skill_dir) {
-                    for entry in entries.filter_map(Result::ok) {
-                        let src = entry.path();
-                        if src.is_file() {
-                            let dst = target_dir.join(src.file_name().unwrap());
-                            fs::copy(&src, &dst).map_err(|e| e.to_string())?;
-                        }
+            if skill_dir.exists() {
+                let skill_dir_real = skill_dir.canonicalize().unwrap_or(skill_dir.clone());
+                if skill_dir_real == repo_real || skill_dir_real.starts_with(&repo_real) {
+                    continue;
+                }
+
+                let skill_dir_key = skill_dir_real.to_string_lossy().to_string();
+                if !seen_skill_dirs.insert(skill_dir_key) {
+                    continue;
+                }
+
+                let entries = collect_skill_entries(&skill_dir)?;
+                for skill in entries {
+                    let source = PathBuf::from(&skill.path);
+                    if !source.exists() {
+                        continue;
                     }
+
+                    let flat_name = make_flat_skill_name(&skill, &app.id, &mut used_names);
+                    let target = repo.join(&flat_name);
+
+                    let source_real = source.canonicalize().unwrap_or(source.clone());
+                    let target_real = target.canonicalize().unwrap_or(target.clone());
+                    if source_real == target_real {
+                        continue;
+                    }
+
+                    copy_path_recursive(&source, &target)?;
+                    written_entries.push(flat_name);
                 }
             }
         }
     }
+
+    written_entries.sort();
+    written_entries.dedup();
+    save_sync_manifest(&repo, &written_entries)?;
     
     Ok(())
+}
+
+#[tauri::command]
+fn get_git_config() -> Result<GitSyncConfig, String> {
+    let config = load_config();
+    Ok(config.git_config)
+}
+
+#[tauri::command]
+fn save_git_config(config: GitSyncConfig) -> Result<(), String> {
+    let mut app_config = load_config();
+    app_config.git_config = GitSyncConfig {
+        repo_url: config.repo_url.trim().to_string(),
+        username: config.username.trim().to_string(),
+        branch: if config.branch.trim().is_empty() {
+            default_git_branch()
+        } else {
+            config.branch.trim().to_string()
+        },
+    };
+    save_config(&app_config)
+}
+
+#[tauri::command]
+fn git_push(repo_path: String) -> Result<(), String> {
+    let app_config = load_config();
+    if app_config.git_config.repo_url.trim().is_empty() {
+        return Err("请先保存仓库地址".to_string());
+    }
+
+    let repo = PathBuf::from(&repo_path);
+    ensure_repo_initialized(&repo, &app_config.git_config)?;
+    sync_to_git(repo_path.clone())?;
+    let _ = commit_repo_changes(&repo)?;
+    run_git(&repo, &["push", "-u", "origin", app_config.git_config.branch.trim()])?;
+    Ok(())
+}
+
+#[tauri::command]
+fn git_pull(repo_path: String) -> Result<String, String> {
+    let app_config = load_config();
+    if app_config.git_config.repo_url.trim().is_empty() {
+        return Err("请先保存仓库地址".to_string());
+    }
+
+    let repo = PathBuf::from(&repo_path);
+    ensure_repo_initialized(&repo, &app_config.git_config)?;
+    let stashed = stash_local_changes_if_needed(&repo, "pull")?;
+    run_git(&repo, &["pull", "--rebase", "origin", app_config.git_config.branch.trim()])?;
+    Ok(if stashed {
+        "已暂存本地未提交改动，并从远程仓库恢复最新 skills".to_string()
+    } else {
+        "已从远程仓库拉取最新内容".to_string()
+    })
+}
+
+#[tauri::command]
+fn git_sync(repo_path: String) -> Result<String, String> {
+    let app_config = load_config();
+    if app_config.git_config.repo_url.trim().is_empty() {
+        return Err("请先保存仓库地址".to_string());
+    }
+
+    let repo = PathBuf::from(&repo_path);
+    ensure_repo_initialized(&repo, &app_config.git_config)?;
+
+    let stashed = stash_local_changes_if_needed(&repo, "sync")?;
+    run_git(&repo, &["pull", "--rebase", "origin", app_config.git_config.branch.trim()])?;
+    sync_to_git(repo_path.clone())?;
+    let _ = commit_repo_changes(&repo)?;
+    run_git(&repo, &["push", "-u", "origin", app_config.git_config.branch.trim()])?;
+    Ok(if stashed {
+        "已暂存本地未提交改动，完成拉取、同步并推送到远程仓库".to_string()
+    } else {
+        "已完成拉取、同步并推送到远程仓库".to_string()
+    })
 }
 
 #[tauri::command]
 fn link_app(app_id: String, git_path: String) -> Result<String, String> {
     let config = load_config();
     let skill_path = resolve_skill_path(&app_id, &config)?;
-    
     let skill_dir = PathBuf::from(&skill_path);
-    let backup_path = format!("{}_backup", skill_path);
-    let backup_dir = PathBuf::from(&backup_path);
-    let git_skill_dir = PathBuf::from(&git_path).join(&app_id);
-    
-    if backup_dir.exists() {
-        return Err("Backup already exists. Unlink first.".to_string());
+    let backup_dir = get_backup_path(&skill_dir);
+    let backup_path = backup_dir.to_string_lossy().to_string();
+    let sync_dir = PathBuf::from(git_path.trim());
+
+    if git_path.trim().is_empty() {
+        return Err("Local sync directory is required".to_string());
     }
-    
+
+    if backup_dir.exists() {
+        return Err(format!(
+            "Backup already exists. Unlink first: {}",
+            backup_dir.to_string_lossy()
+        ));
+    }
+
+    if sync_dir.exists() && !sync_dir.is_dir() {
+        return Err(format!(
+            "Local sync path must be a directory: {}",
+            sync_dir.to_string_lossy()
+        ));
+    }
+
     if skill_dir.exists() {
         fs::rename(&skill_dir, &backup_dir).map_err(|e| e.to_string())?;
     }
-    
-    fs::create_dir_all(&git_skill_dir).map_err(|e| e.to_string())?;
-    
+
+    if let Some(parent) = skill_dir.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    fs::create_dir_all(&sync_dir).map_err(|e| e.to_string())?;
+
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&git_skill_dir, &skill_dir).map_err(|e| e.to_string())?;
-    
+    std::os::unix::fs::symlink(&sync_dir, &skill_dir).map_err(|e| e.to_string())?;
+
     #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&git_skill_dir, &skill_dir).map_err(|e| e.to_string())?;
-    
+    std::os::windows::fs::symlink_dir(&sync_dir, &skill_dir).map_err(|e| e.to_string())?;
+
     Ok(backup_path)
 }
 
@@ -783,11 +1769,9 @@ fn link_app(app_id: String, git_path: String) -> Result<String, String> {
 fn unlink_app(app_id: String) -> Result<(), String> {
     let config = load_config();
     let skill_path = resolve_skill_path(&app_id, &config)?;
-    
     let skill_dir = PathBuf::from(&skill_path);
-    let backup_path = format!("{}_backup", skill_path);
-    let backup_dir = PathBuf::from(&backup_path);
-    
+    let backup_dir = get_backup_path(&skill_dir);
+
     if skill_dir.exists() {
         if let Ok(metadata) = fs::symlink_metadata(&skill_dir) {
             if metadata.file_type().is_symlink() {
@@ -895,12 +1879,21 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             scan_apps,
             scan_skills,
+            rename_skill,
+            delete_skill,
             sync_to_git,
+            get_git_config,
+            save_git_config,
+            git_push,
+            git_pull,
+            git_sync,
             link_app,
             unlink_app,
             select_folder,
             save_git_path,
             set_custom_path,
+            open_path_in_file_manager,
+            launch_app,
             add_custom_app,
             check_updates,
             get_version,

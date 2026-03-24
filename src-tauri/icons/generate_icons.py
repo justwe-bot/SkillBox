@@ -5,103 +5,82 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 
-BACKGROUND = (9, 9, 38, 255)
+BACKGROUND = (6, 6, 26, 255)
 FOREGROUND = (255, 255, 255, 255)
 RENDER_SCALE = 8
 
 
+def polygon(points, scale, offset_x, offset_y):
+    return [(offset_x + (x * scale), offset_y + (y * scale)) for x, y in points]
+
+
+def draw_logo(draw: ImageDraw.ImageDraw, scale: float, offset_x: float, offset_y: float) -> None:
+    draw.polygon(
+        polygon([(4, 13), (8, 11), (12, 13), (8, 15)], scale, offset_x, offset_y),
+        fill=(255, 255, 255, round(255 * 0.8)),
+    )
+    draw.polygon(
+        polygon([(4, 13), (4, 17), (8, 19), (8, 15)], scale, offset_x, offset_y),
+        fill=(255, 255, 255, round(255 * 0.5)),
+    )
+    draw.polygon(
+        polygon([(8, 15), (8, 19), (12, 17), (12, 13)], scale, offset_x, offset_y),
+        fill=(255, 255, 255, round(255 * 0.6)),
+    )
+
+    draw.polygon(
+        polygon([(12, 13), (16, 11), (20, 13), (16, 15)], scale, offset_x, offset_y),
+        fill=(255, 255, 255, round(255 * 0.8)),
+    )
+    draw.polygon(
+        polygon([(12, 13), (12, 17), (16, 19), (16, 15)], scale, offset_x, offset_y),
+        fill=(255, 255, 255, round(255 * 0.5)),
+    )
+    draw.polygon(
+        polygon([(16, 15), (16, 19), (20, 17), (20, 13)], scale, offset_x, offset_y),
+        fill=(255, 255, 255, round(255 * 0.6)),
+    )
+
+    draw.polygon(
+        polygon([(8, 7), (12, 5), (16, 7), (12, 9)], scale, offset_x, offset_y),
+        fill=(255, 255, 255, round(255 * 0.9)),
+    )
+    draw.polygon(
+        polygon([(8, 7), (8, 11), (12, 13), (12, 9)], scale, offset_x, offset_y),
+        fill=(255, 255, 255, round(255 * 0.6)),
+    )
+    draw.polygon(
+        polygon([(12, 9), (12, 13), (16, 11), (16, 7)], scale, offset_x, offset_y),
+        fill=(255, 255, 255, round(255 * 0.7)),
+    )
+
+    line_points = polygon([(8, 11), (12, 13), (16, 11)], scale, offset_x, offset_y)
+    draw.line(line_points, fill=(255, 255, 255, round(255 * 0.4)), width=max(1, round(scale * 0.28)))
+
+
 def create_icon(size: int) -> Image.Image:
     render_size = size * RENDER_SCALE
-    img = Image.new("RGBA", (render_size, render_size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
+    base = Image.new("RGBA", (render_size, render_size), (0, 0, 0, 0))
+    base_draw = ImageDraw.Draw(base, "RGBA")
+    logo_layer = Image.new("RGBA", (render_size, render_size), (0, 0, 0, 0))
+    logo_draw = ImageDraw.Draw(logo_layer, "RGBA")
 
     pad = max(1, round(render_size * 0.09))
     radius = round(render_size * 0.24)
-    stroke = max(2, round(render_size * 0.055))
 
-    draw.rounded_rectangle(
+    base_draw.rounded_rectangle(
         [pad, pad, render_size - pad, render_size - pad],
         radius=radius,
         fill=BACKGROUND,
     )
 
-    doc_left = round(render_size * 0.32)
-    doc_top = round(render_size * 0.22)
-    doc_right = round(render_size * 0.69)
-    doc_bottom = round(render_size * 0.77)
-    fold = round(render_size * 0.12)
-    inner_radius = round(render_size * 0.045)
+    logo_scale = render_size / 112 * 3.95
+    offset_x = (render_size / 2) - (12 * logo_scale)
+    offset_y = (render_size / 2) - (12 * logo_scale)
+    draw_logo(logo_draw, logo_scale, offset_x, offset_y)
 
-    draw.rounded_rectangle(
-        [doc_left, doc_top, doc_right, doc_bottom],
-        radius=inner_radius,
-        outline=FOREGROUND,
-        width=stroke,
-    )
-
-    # Remove the top-right corner so the fold looks cut out.
-    draw.polygon(
-        [
-            (doc_right - fold, doc_top),
-            (doc_right, doc_top),
-            (doc_right, doc_top + fold),
-        ],
-        fill=BACKGROUND,
-    )
-
-    # Draw the folded corner.
-    draw.line(
-        [
-            (doc_right - fold, doc_top),
-            (doc_right - fold, doc_top + fold),
-            (doc_right, doc_top + fold),
-        ],
-        fill=FOREGROUND,
-        width=stroke,
-        joint="curve",
-    )
-
-    code_y = round(render_size * 0.58)
-    code_half_w = round(render_size * 0.072)
-    code_h = round(render_size * 0.10)
-    slash_h = round(render_size * 0.11)
-    slash_w = max(2, round(render_size * 0.03))
-
-    left_x = round(render_size * 0.42)
-    right_x = round(render_size * 0.58)
-
-    draw.line(
-        [
-            (left_x + code_half_w, code_y - code_h),
-            (left_x - code_half_w, code_y),
-            (left_x + code_half_w, code_y + code_h),
-        ],
-        fill=FOREGROUND,
-        width=stroke,
-        joint="curve",
-    )
-
-    draw.line(
-        [
-            (right_x - code_half_w, code_y - code_h),
-            (right_x + code_half_w, code_y),
-            (right_x - code_half_w, code_y + code_h),
-        ],
-        fill=FOREGROUND,
-        width=stroke,
-        joint="curve",
-    )
-
-    draw.line(
-        [
-            (round(render_size * 0.52), code_y - slash_h),
-            (round(render_size * 0.48), code_y + slash_h),
-        ],
-        fill=FOREGROUND,
-        width=slash_w,
-    )
-
-    return img.resize((size, size), Image.Resampling.LANCZOS)
+    composed = Image.alpha_composite(base, logo_layer)
+    return composed.resize((size, size), Image.Resampling.LANCZOS)
 
 
 def build_icns(base: Path) -> None:

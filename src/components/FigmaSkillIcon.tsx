@@ -15,38 +15,21 @@ export function FigmaSkillIcon({ size = 74, className }: FigmaSkillIconProps) {
       aria-hidden="true"
     >
       <rect width="112" height="112" rx="30" fill="#06061A" />
-      <path
-        d="M39 24H67L82 39V85H39C34.5817 85 31 81.4183 31 77V32C31 27.5817 34.5817 24 39 24Z"
-        stroke="white"
-        strokeWidth="7"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M67 24V39H82"
-        stroke="white"
-        strokeWidth="7"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M46 56L39 63L46 70"
-        stroke="white"
-        strokeWidth="8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M66 56L73 63L66 70"
-        stroke="white"
-        strokeWidth="8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M57 53L54 73"
-        stroke="white"
-        strokeWidth="8"
-        strokeLinecap="round"
-      />
+      <g transform="translate(56, 56) scale(3.95) translate(-12, -12)" fill="#FFFFFF">
+        <path d="M 4 13 L 8 11 L 12 13 L 8 15 Z" opacity="0.8" />
+        <path d="M 4 13 L 4 17 L 8 19 L 8 15 Z" opacity="0.5" />
+        <path d="M 8 15 L 8 19 L 12 17 L 12 13 Z" opacity="0.6" />
+
+        <path d="M 12 13 L 16 11 L 20 13 L 16 15 Z" opacity="0.8" />
+        <path d="M 12 13 L 12 17 L 16 19 L 16 15 Z" opacity="0.5" />
+        <path d="M 16 15 L 16 19 L 20 17 L 20 13 Z" opacity="0.6" />
+
+        <path d="M 8 7 L 12 5 L 16 7 L 12 9 Z" opacity="0.9" />
+        <path d="M 8 7 L 8 11 L 12 13 L 12 9 Z" opacity="0.6" />
+        <path d="M 12 9 L 12 13 L 16 11 L 16 7 Z" opacity="0.7" />
+
+        <path d="M 8 11 L 12 13 L 16 11" stroke="#FFFFFF" strokeWidth="0.5" opacity="0.4" />
+      </g>
     </svg>
   )
 }

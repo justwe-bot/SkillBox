@@ -6,6 +6,7 @@ export interface BackendApp {
   skill_count: number
   is_linked: boolean
   is_installed: boolean
+  is_custom?: boolean
   backup_path?: string | null
   custom_path?: string | null
 }
@@ -18,6 +19,7 @@ export interface AppRecord {
   skillCount: number
   isLinked: boolean
   isInstalled: boolean
+  isCustom: boolean
   backupPath?: string | null
   customPath?: string | null
 }
@@ -56,8 +58,15 @@ export interface ScanAppsResponseObject {
 
 export type ScanAppsResponse = [BackendApp[], string] | ScanAppsResponseObject
 
+export interface GitSyncConfig {
+  repoUrl: string
+  username: string
+  branch: string
+}
+
 export interface AppPreferences {
   autoScan: boolean
+  autoSync: boolean
   desktopNotifications: boolean
   theme: 'system' | 'light' | 'dark'
 }

@@ -1,27 +1,37 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { open as openDialog } from '@tauri-apps/api/dialog'
-import { open as openPath } from '@tauri-apps/api/shell'
-import { FolderPlus, Scan, Search, Settings } from 'lucide-react'
+import { Archive, FolderOpen, FolderPlus, Scan, Search, Settings } from 'lucide-react'
 import { ApplicationCard } from '../components/ApplicationCard'
 import { FigmaSkillIcon } from '../components/FigmaSkillIcon'
 import { GitPanel } from '../components/GitPanel'
 import { Modal } from '../components/Modal'
 import { SkillItem } from '../components/SkillItem'
+import { ThemeToggle } from '../components/ThemeToggle'
 import { useToast } from '../components/ToastProvider'
 import {
   addCustomApp,
+  deleteSkill,
+  getGitConfig,
+  gitPull,
+  gitPush,
+  gitSync,
   linkApp,
   loadSkillInventory,
+  launchApp,
+  openPathInFileManager,
+  renameSkill,
+  saveGitConfig as persistGitConfig,
   saveGitPath,
   scanApps,
   setCustomPath,
   syncToGit,
   unlinkApp,
 } from '../lib/tauri'
-import type { AppRecord, SkillRecord } from '../types'
+import type { AppRecord, GitSyncConfig, SkillRecord } from '../types'
 
 type TabKey = 'applications' | 'skills'
+type GitBusyAction = 'saveConfig' | 'push' | 'pull' | 'sync' | 'aggregate' | 'pickPath' | 'changePath' | null
 
 export default function DashboardPage() {
   const { notify } = useToast()
@@ -29,9 +39,10 @@ export default function DashboardPage() {
   const [apps, setApps] = useState<AppRecord[]>([])
   const [skills, setSkills] = useState<SkillRecord[]>([])
   const [gitPath, setGitPath] = useState('')
+  const [gitConfig, setGitConfig] = useState<GitSyncConfig>({ repoUrl: '', username: '', branch: 'main' })
   const [loading, setLoading] = useState(true)
   const [busyAppId, setBusyAppId] = useState<string | null>(null)
-  const [syncing, setSyncing] = useState(false)
+  const [gitBusyAction, setGitBusyAction] = useState<GitBusyAction>(null)
   const [search, setSearch] = useState('')
   const [customModalOpen, setCustomModalOpen] = useState(false)
   const [editModalOpen, setEditModalOpen] = useState(false)
@@ -39,18 +50,29 @@ export default function DashboardPage() {
   const [customAppName, setCustomAppName] = useState('')
   const [customAppPath, setCustomAppPath] = useState('')
   const [editPathValue, setEditPathValue] = useState('')
+  const [selectedSkill, setSelectedSkill] = useState<SkillRecord | null>(null)
+  const [detailModalOpen, setDetailModalOpen] = useState(false)
+  const [renameModalOpen, setRenameModalOpen] = useState(false)
+  const [conflictModalOpen, setConflictModalOpen] = useState(false)
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false)
+  const [renameValue, setRenameValue] = useState('')
+  const [skillBusy, setSkillBusy] = useState(false)
+  const [pendingGitPath, setPendingGitPath] = useState('')
+  const [confirmGitPathOpen, setConfirmGitPathOpen] = useState(false)
+  const gitBusy = gitBusyAction !== null
 
   async function refreshData(showToast = false) {
     setLoading(true)
 
     try {
-      const appState = await scanApps()
+      const [appState, configState] = await Promise.all([scanApps(), getGitConfig()])
       setApps(appState.apps)
       setGitPath(appState.gitPath)
+      setGitConfig(configState)
       setSkills(await loadSkillInventory(appState.apps))
 
       if (showToast) {
-        notify(`扫描完成，共发现 ${appState.apps.length} 个应用`, 'success')
+        notify(`扫描完成，共检测到 ${appState.apps.filter((app) => app.isInstalled).length} 个应用`, 'success')
       }
     } catch (error) {
       notify(`加载失败: ${String(error)}`, 'error')
@@ -78,9 +100,26 @@ export default function DashboardPage() {
     })
   }, [search, skills])
 
+  const sortedApps = useMemo(() => {
+    return apps
+      .map((app, index) => ({ app, index }))
+      .sort((left, right) => {
+        if (left.app.isInstalled !== right.app.isInstalled) {
+          return left.app.isInstalled ? -1 : 1
+        }
+
+        if (left.app.isLinked !== right.app.isLinked) {
+          return left.app.isLinked ? -1 : 1
+        }
+
+        return left.index - right.index
+      })
+      .map(({ app }) => app)
+  }, [apps])
+
   const stats = useMemo(() => {
     return {
-      appCount: apps.length,
+      appCount: apps.filter((app) => app.isInstalled).length,
       skillCount: skills.length,
       linkedCount: apps.filter((app) => app.isLinked).length,
       conflictCount: skills.filter((skill) => skill.conflicts).length,
@@ -112,46 +151,162 @@ export default function DashboardPage() {
     }
   }
 
+  async function handleOpenAppFolder(app: AppRecord) {
+    try {
+      await openPathInFileManager(app.path)
+    } catch (error) {
+      notify(`打开文件夹失败: ${String(error)}`, 'error')
+    }
+  }
+
+  async function handleLaunchApp(app: AppRecord) {
+    try {
+      await launchApp(app.id)
+    } catch (error) {
+      notify(`运行软件失败: ${String(error)}`, 'error')
+    }
+  }
+
+  async function handleOpenGitFolder() {
+    if (!gitPath) {
+      return
+    }
+
+    try {
+      await openPathInFileManager(gitPath)
+    } catch (error) {
+      notify(`打开本地同步目录失败: ${String(error)}`, 'error')
+    }
+  }
+
+  async function handleAggregateSkills() {
+    if (gitBusy || !gitPath) {
+      notify('请先选择本地同步目录', 'error')
+      return
+    }
+
+    setGitBusyAction('aggregate')
+    try {
+      await syncToGit(gitPath)
+      await refreshData()
+      notify('已将所有应用中的 skills 汇总到本地同步目录', 'success')
+    } catch (error) {
+      notify(`汇总技能失败: ${String(error)}`, 'error')
+    } finally {
+      setGitBusyAction(null)
+    }
+  }
+
   async function handlePickGitFolder() {
+    if (gitBusy) {
+      return
+    }
+
+    setGitBusyAction('pickPath')
     const selected = await openDialog({
       directory: true,
       multiple: false,
       title: '选择技能同步目录',
     })
 
-    if (typeof selected !== 'string' || !selected) {
+    if (typeof selected === 'string' && selected) {
+      setPendingGitPath(selected)
+      setConfirmGitPathOpen(true)
+    }
+
+    setGitBusyAction(null)
+  }
+
+  async function handleConfirmGitFolderChange() {
+    if (gitBusy || !pendingGitPath) {
       return
     }
 
+    setGitBusyAction('changePath')
     try {
-      await saveGitPath(selected)
-      setGitPath(selected)
-      notify('同步目录已保存', 'success')
+      await saveGitPath(pendingGitPath)
+      await syncToGit(pendingGitPath)
+      setGitPath(pendingGitPath)
+      setConfirmGitPathOpen(false)
+      setPendingGitPath('')
+      await refreshData()
+      notify('本地同步目录已更新，当前技能已自动同步到新路径', 'success')
     } catch (error) {
-      notify(`保存目录失败: ${String(error)}`, 'error')
+      notify(`更新本地同步目录失败: ${String(error)}`, 'error')
+    } finally {
+      setGitBusyAction(null)
     }
   }
 
   async function handleSync() {
-    if (!gitPath) {
-      notify('请先选择同步目录', 'error')
+    if (gitBusy || !gitPath) {
+      notify('请先选择本地同步目录', 'error')
       return
     }
 
-    setSyncing(true)
+    setGitBusyAction('sync')
     try {
-      await syncToGit(gitPath)
+      const message = await gitSync(gitPath)
       await refreshData()
-      notify('已同步当前检测到的技能到仓库目录', 'success')
+      notify(message, 'success')
     } catch (error) {
       notify(`同步失败: ${String(error)}`, 'error')
     } finally {
-      setSyncing(false)
+      setGitBusyAction(null)
     }
   }
 
-  function handleSaveGitConfig(_config: { repoUrl: string; username: string; branch: string }) {
-    notify('界面配置已保存，同步目录仍然使用当前 Tauri 配置。', 'success')
+  async function handlePush() {
+    if (gitBusy || !gitPath) {
+      notify('请先选择本地同步目录', 'error')
+      return
+    }
+
+    setGitBusyAction('push')
+    try {
+      await gitPush(gitPath)
+      await refreshData()
+      notify('已推送到远程仓库', 'success')
+    } catch (error) {
+      notify(`推送失败: ${String(error)}`, 'error')
+    } finally {
+      setGitBusyAction(null)
+    }
+  }
+
+  async function handlePull() {
+    if (gitBusy || !gitPath) {
+      notify('请先选择本地同步目录', 'error')
+      return
+    }
+
+    setGitBusyAction('pull')
+    try {
+      const message = await gitPull(gitPath)
+      await refreshData()
+      notify(message, 'success')
+    } catch (error) {
+      notify(`拉取失败: ${String(error)}`, 'error')
+    } finally {
+      setGitBusyAction(null)
+    }
+  }
+
+  async function handleSaveGitConfig(config: GitSyncConfig) {
+    if (gitBusy) {
+      return
+    }
+
+    setGitBusyAction('saveConfig')
+    try {
+      await persistGitConfig(config)
+      setGitConfig(config)
+      notify('Git 配置已保存', 'success')
+    } catch (error) {
+      notify(`保存配置失败: ${String(error)}`, 'error')
+    } finally {
+      setGitBusyAction(null)
+    }
   }
 
   async function chooseCustomPath(setter: (path: string) => void) {
@@ -207,19 +362,73 @@ export default function DashboardPage() {
     }
   }
 
-  async function handleOpenSkill(path: string) {
+  function handleViewSkill(skill: SkillRecord) {
+    setSelectedSkill(skill)
+    setDetailModalOpen(true)
+  }
+
+  function handleStartRenameSkill(skill: SkillRecord) {
+    setSelectedSkill(skill)
+    setRenameValue(skill.name)
+    setRenameModalOpen(true)
+  }
+
+  function handleResolveConflict(skill: SkillRecord) {
+    setSelectedSkill(skill)
+    setConflictModalOpen(true)
+  }
+
+  function handleAskDeleteSkill(skill: SkillRecord) {
+    setSelectedSkill(skill)
+    setDeleteModalOpen(true)
+  }
+
+  async function handleConfirmRenameSkill() {
+    if (!selectedSkill || !renameValue.trim()) {
+      notify('请输入新的技能名称', 'error')
+      return
+    }
+
+    setSkillBusy(true)
     try {
-      await openPath(path)
+      await renameSkill(selectedSkill.path, renameValue.trim())
+      setRenameModalOpen(false)
+      setConflictModalOpen(false)
+      setSelectedSkill(null)
+      await refreshData()
+      notify('技能已重命名', 'success')
     } catch (error) {
-      notify(`无法打开路径: ${String(error)}`, 'error')
+      notify(`重命名失败: ${String(error)}`, 'error')
+    } finally {
+      setSkillBusy(false)
+    }
+  }
+
+  async function handleConfirmDeleteSkill() {
+    if (!selectedSkill) {
+      return
+    }
+
+    setSkillBusy(true)
+    try {
+      await deleteSkill(selectedSkill.path)
+      setDeleteModalOpen(false)
+      setConflictModalOpen(false)
+      setSelectedSkill(null)
+      await refreshData()
+      notify('技能已删除', 'success')
+    } catch (error) {
+      notify(`删除失败: ${String(error)}`, 'error')
+    } finally {
+      setSkillBusy(false)
     }
   }
 
   return (
     <div className="page-shell">
-      <header className="hero">
+      <header className="hero hero--dashboard">
         <div className="hero__brand">
-          <FigmaSkillIcon size={74} />
+          <FigmaSkillIcon size={48} />
           <div>
             <h1>AI Skills Manager</h1>
             <p className="hero__text">统一管理所有 AI 应用的技能</p>
@@ -230,6 +439,7 @@ export default function DashboardPage() {
             <Scan size={18} />
             {loading ? '扫描中...' : '扫描应用'}
           </button>
+          <ThemeToggle />
           <Link className="button button--square" to="/settings" aria-label="设置">
             <Settings size={22} />
           </Link>
@@ -275,17 +485,20 @@ export default function DashboardPage() {
                 </button>
               </div>
 
-              {apps.length === 0 ? (
+              {sortedApps.length === 0 ? (
                 <div className="surface empty-state">
                   <p>当前没有发现任何应用，点击上方“重新扫描”后再试。</p>
                 </div>
               ) : (
-                apps.map((app) => (
+                sortedApps.map((app) => (
                   <ApplicationCard
                     key={app.id}
                     app={app}
+                    totalSkillCount={skills.length}
                     busy={busyAppId === app.id}
                     onToggleLink={handleToggleLink}
+                    onOpenFolder={handleOpenAppFolder}
+                    onLaunchApp={handleLaunchApp}
                     onEditPath={openEditPath}
                   />
                 ))
@@ -305,26 +518,97 @@ export default function DashboardPage() {
                 </div>
                 <label className="search-box">
                   <Search size={16} />
-                  <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索技能名称、路径或来源" />
+                  <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索技能..." />
                 </label>
               </div>
+
+              {stats.conflictCount ? (
+                <div className="surface conflict-banner">
+                  <div className="conflict-banner__body">
+                    <strong>检测到 {stats.conflictCount} 个技能冲突</strong>
+                    <p>相同名称的技能在多个应用中存在不同版本，请在菜单中查看详情并处理。</p>
+                  </div>
+                </div>
+              ) : null}
 
               {filteredSkills.length === 0 ? (
                 <div className="surface empty-state">
                   <p>{search ? '没有匹配的技能结果。' : '当前没有可显示的技能文件。'}</p>
                 </div>
               ) : (
-                filteredSkills.map((skill) => <SkillItem key={skill.id} skill={skill} onOpen={handleOpenSkill} />)
+                filteredSkills.map((skill) => (
+                  <SkillItem
+                    key={skill.id}
+                    skill={skill}
+                    onView={handleViewSkill}
+                    onRename={handleStartRenameSkill}
+                    onDelete={handleAskDeleteSkill}
+                    onResolveConflict={handleResolveConflict}
+                  />
+                ))
               )}
             </section>
           )}
         </section>
 
         <aside className="side-column">
-          <GitPanel gitPath={gitPath} syncing={syncing} onSaveConfig={handleSaveGitConfig} onSync={handleSync} />
-          <button className="button button--ghost button--full side-column__picker" type="button" onClick={() => void handlePickGitFolder()}>
-            选择本地同步目录
-          </button>
+          <GitPanel
+            gitPath={gitPath}
+            gitConfig={gitConfig}
+            busyAction={gitBusyAction}
+            onSaveConfig={handleSaveGitConfig}
+            onPush={handlePush}
+            onPull={handlePull}
+            onSync={handleSync}
+          />
+          {gitPath ? (
+            <>
+              <div className="surface side-column__path-card">
+                <div className="side-column__path-actions">
+                  <button
+                    className="button button--icon-ghost side-column__path-action"
+                    type="button"
+                    onClick={() => void handleOpenGitFolder()}
+                    aria-label="打开本地同步目录"
+                    title="打开文件夹"
+                  >
+                    <FolderOpen size={18} />
+                  </button>
+                </div>
+                <span className="side-column__path-label">本地同步目录</span>
+                <strong className="side-column__path-value">{gitPath}</strong>
+              </div>
+              <div className="side-column__path-buttons">
+                <button
+                  className="button button--ghost side-column__path-primary"
+                  type="button"
+                  onClick={() => void handlePickGitFolder()}
+                  disabled={gitBusy}
+                >
+                  {gitBusyAction === 'pickPath' || gitBusyAction === 'changePath' ? '选择中...' : '更改路径'}
+                </button>
+                <button
+                  className="button button--primary side-column__path-primary"
+                  type="button"
+                  onClick={() => void handleAggregateSkills()}
+                  disabled={gitBusy}
+                >
+                  <Archive size={17} />
+                  {gitBusyAction === 'aggregate' ? '汇总中...' : '汇总技能'}
+                </button>
+              </div>
+            </>
+          ) : null}
+          {!gitPath ? (
+            <button
+              className="button button--ghost button--full side-column__picker"
+              type="button"
+              onClick={() => void handlePickGitFolder()}
+              disabled={gitBusy}
+            >
+              {gitBusyAction === 'pickPath' ? '选择中...' : '选择本地同步目录'}
+            </button>
+          ) : null}
         </aside>
       </main>
 
@@ -387,6 +671,171 @@ export default function DashboardPage() {
           </button>
           <button className="button button--primary" type="button" onClick={() => void handleSavePath()}>
             保存
+          </button>
+        </footer>
+      </Modal>
+
+      <Modal open={detailModalOpen} title={selectedSkill?.name ?? '技能详情'} onClose={() => setDetailModalOpen(false)}>
+        {selectedSkill ? (
+          <>
+            <div className="modal__body modal__body--stack">
+              <div className="detail-grid">
+                <div className="detail-field">
+                  <span>描述</span>
+                  <strong>{selectedSkill.description || '暂无描述'}</strong>
+                </div>
+                <div className="detail-field">
+                  <span>来源</span>
+                  <strong>{selectedSkill.sources.join(', ')}</strong>
+                </div>
+                <div className="detail-field">
+                  <span>路径</span>
+                  <strong className="detail-field__path">{selectedSkill.path}</strong>
+                </div>
+                <div className="detail-field">
+                  <span>大小</span>
+                  <strong>{(selectedSkill.size / 1024).toFixed(1)} KB</strong>
+                </div>
+                <div className="detail-field">
+                  <span>文件数</span>
+                  <strong>{selectedSkill.fileCount}</strong>
+                </div>
+                <div className="detail-field">
+                  <span>修改时间</span>
+                  <strong>{selectedSkill.modified}</strong>
+                </div>
+              </div>
+            </div>
+            <footer className="modal__footer">
+              <button className="button button--ghost" type="button" onClick={() => setDetailModalOpen(false)}>
+                关闭
+              </button>
+              <button className="button button--primary" type="button" onClick={() => {
+                setDetailModalOpen(false)
+                handleStartRenameSkill(selectedSkill)
+              }}>
+                重命名
+              </button>
+            </footer>
+          </>
+        ) : null}
+      </Modal>
+
+      <Modal open={renameModalOpen} title={selectedSkill ? `重命名 ${selectedSkill.name}` : '重命名技能'} onClose={() => setRenameModalOpen(false)}>
+        <div className="modal__body">
+          <div className="field-group">
+            <label htmlFor="rename-skill-name">技能名称</label>
+            <input
+              id="rename-skill-name"
+              value={renameValue}
+              onChange={(event) => setRenameValue(event.target.value)}
+              placeholder="输入新的技能名称"
+            />
+          </div>
+        </div>
+        <footer className="modal__footer">
+          <button className="button button--ghost" type="button" onClick={() => setRenameModalOpen(false)}>
+            取消
+          </button>
+          <button className="button button--primary" type="button" onClick={() => void handleConfirmRenameSkill()} disabled={skillBusy}>
+            保存
+          </button>
+        </footer>
+      </Modal>
+
+      <Modal open={deleteModalOpen} title={selectedSkill ? `删除 ${selectedSkill.name}` : '删除技能'} onClose={() => setDeleteModalOpen(false)}>
+        <div className="modal__body modal__body--stack">
+          <p className="modal__copy">删除后将移除技能文件或目录，此操作不可撤销。</p>
+          {selectedSkill ? (
+            <div className="detail-field">
+              <span>目标路径</span>
+              <strong className="detail-field__path">{selectedSkill.path}</strong>
+            </div>
+          ) : null}
+        </div>
+        <footer className="modal__footer">
+          <button className="button button--ghost" type="button" onClick={() => setDeleteModalOpen(false)}>
+            取消
+          </button>
+          <button className="button button--primary button--danger" type="button" onClick={() => void handleConfirmDeleteSkill()} disabled={skillBusy}>
+            删除
+          </button>
+        </footer>
+      </Modal>
+
+      <Modal open={conflictModalOpen} title={selectedSkill ? `${selectedSkill.name} 存在冲突` : '技能冲突'} onClose={() => setConflictModalOpen(false)}>
+        <div className="modal__body modal__body--stack">
+          {selectedSkill ? (
+            <>
+              <p className="modal__copy">
+                这个技能在多个应用中存在不同版本。当前检测到 {selectedSkill.duplicateCount} 份来源，涉及 {selectedSkill.sources.join('、')}。
+              </p>
+              <div className="detail-grid">
+                <div className="detail-field">
+                  <span>规范名</span>
+                  <strong>{selectedSkill.canonicalName}</strong>
+                </div>
+                <div className="detail-field">
+                  <span>路径</span>
+                  <strong className="detail-field__path">{selectedSkill.path}</strong>
+                </div>
+              </div>
+            </>
+          ) : null}
+        </div>
+        <footer className="modal__footer">
+          <button className="button button--ghost" type="button" onClick={() => setConflictModalOpen(false)}>
+            稍后处理
+          </button>
+          <button className="button button--ghost" type="button" onClick={() => {
+            setConflictModalOpen(false)
+            if (selectedSkill) {
+              handleAskDeleteSkill(selectedSkill)
+            }
+          }}>
+            删除当前项
+          </button>
+          <button className="button button--primary" type="button" onClick={() => {
+            setConflictModalOpen(false)
+            if (selectedSkill) {
+              handleStartRenameSkill(selectedSkill)
+            }
+          }}>
+            重命名当前项
+          </button>
+        </footer>
+      </Modal>
+
+      <Modal open={confirmGitPathOpen} title="确认更改本地同步目录" onClose={() => {
+        setConfirmGitPathOpen(false)
+        setPendingGitPath('')
+      }}>
+        <div className="modal__body modal__body--stack">
+          <p className="modal__copy">确定要把所有 skill 都同步到这个目录进行统一管理吗？</p>
+          {pendingGitPath ? (
+            <div className="detail-field">
+              <span>目标目录</span>
+              <strong className="detail-field__path">{pendingGitPath}</strong>
+            </div>
+          ) : null}
+        </div>
+        <footer className="modal__footer">
+          <button
+            className="button button--ghost"
+            type="button"
+            onClick={() => {
+              if (gitBusyAction === 'changePath') {
+                return
+              }
+              setConfirmGitPathOpen(false)
+              setPendingGitPath('')
+            }}
+            disabled={gitBusyAction === 'changePath'}
+          >
+            取消
+          </button>
+          <button className="button button--primary" type="button" onClick={() => void handleConfirmGitFolderChange()} disabled={gitBusyAction === 'changePath'}>
+            {gitBusyAction === 'changePath' ? '同步中...' : '确定并同步'}
           </button>
         </footer>
       </Modal>

@@ -1174,68 +1174,6 @@ fn make_flat_skill_name(
     }
 }
 
-fn make_conflict_skill_name(
-    skill: &SkillFile,
-    app_id: &str,
-    used_names: &mut std::collections::HashSet<String>,
-) -> String {
-    let skill_path = PathBuf::from(&skill.path);
-    let original_name = skill_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| {
-            let fallback = if skill.canonical_name.is_empty() {
-                normalize_skill_name(&skill.name)
-            } else {
-                skill.canonical_name.clone()
-            };
-
-            if skill_path.is_file() {
-                format!("{}.md", fallback)
-            } else {
-                fallback
-            }
-        });
-
-    let path = Path::new(&original_name);
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("skill");
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default();
-
-    // 使用 技能名-应用名 格式
-    let conflict_name = if extension.is_empty() {
-        format!("{}-{}", stem, app_id)
-    } else {
-        format!("{}-{}.{}", stem, app_id, extension)
-    };
-
-    if used_names.insert(conflict_name.clone()) {
-        return conflict_name;
-    }
-
-    // 如果连冲突名称都存在，添加数字后缀
-    let mut attempt = 1usize;
-    loop {
-        let candidate = if extension.is_empty() {
-            format!("{}-{}-{}", stem, app_id, attempt)
-        } else {
-            format!("{}-{}-{}.{}", stem, app_id, attempt, extension)
-        };
-
-        if used_names.insert(candidate.clone()) {
-            return candidate;
-        }
-
-        attempt += 1;
-    }
-}
 
 fn is_directory_empty(path: &Path) -> Result<bool, String> {
     Ok(fs::read_dir(path)
@@ -1319,7 +1257,12 @@ fn ensure_repo_initialized(repo_path: &Path, git_config: &GitSyncConfig) -> Resu
         }
     }
 
-    if !git_config.branch.trim().is_empty() {
+    // Only force-switch branch when there are no commits yet; if the repo
+    // already has commits (i.e. local skills exist) we must NOT run
+    // `checkout -B` here because it would fail when untracked files share
+    // names with remote files.  Branch alignment for repos that already have
+    // commits is handled inside git_pull / git_push instead.
+    if !git_config.branch.trim().is_empty() && !repo_has_any_commit(repo_path)? {
         let _ = run_git(repo_path, &["checkout", "-B", git_config.branch.trim()]);
     }
 
@@ -1362,18 +1305,16 @@ fn repo_has_local_changes(repo_path: &Path) -> Result<bool, String> {
     Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
-fn stash_local_changes_if_needed(repo_path: &Path, label: &str) -> Result<bool, String> {
-    if !repo_has_local_changes(repo_path)? {
-        return Ok(false);
-    }
+fn repo_has_any_commit(repo_path: &Path) -> Result<bool, String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run git rev-parse HEAD: {}", e))?;
 
-    let stash_name = format!("skillbox-auto-stash-{}", label);
-    run_git(
-        repo_path,
-        &["stash", "push", "--include-untracked", "-m", &stash_name],
-    )?;
-    Ok(true)
+    Ok(output.status.success())
 }
+
 
 fn check_link_status(path: &str) -> (bool, Option<String>) {
     let path_obj = PathBuf::from(path);
@@ -1537,16 +1478,13 @@ fn scan_apps() -> Result<(Vec<SkillApp>, String), String> {
             || app.skill_paths.iter().any(|value| value.exists())
             || app.install_markers.iter().any(|value| value.exists())
             || backup_path.is_some();
-        let skill_count = collect_skill_entries(Path::new(&path))
-            .map(|entries| entries.len())
-            .unwrap_or(0);
 
         apps.push(SkillApp {
             id: app.id.clone(),
             name: app.name,
             path,
             icon: app.icon,
-            skill_count,
+            skill_count: 0,
             is_linked,
             is_installed,
             is_custom: false,
@@ -1559,16 +1497,13 @@ fn scan_apps() -> Result<(Vec<SkillApp>, String), String> {
         if !apps.iter().any(|a| a.id == *id) {
             let is_installed = PathBuf::from(custom_path).exists();
             let (is_linked, backup_path) = check_link_status(custom_path);
-            let skill_count = collect_skill_entries(Path::new(custom_path))
-                .map(|entries| entries.len())
-                .unwrap_or(0);
 
             apps.push(SkillApp {
                 id: id.clone(),
                 name: capitalize_first(id),
                 path: custom_path.clone(),
                 icon: "📁".to_string(),
-                skill_count,
+                skill_count: 0,
                 is_linked,
                 is_installed,
                 is_custom: true,
@@ -1747,13 +1682,19 @@ fn sync_to_git(repo_path: String) -> Result<(), String> {
 
                     // 获取基础名称
                     let base_name = get_skill_base_name(&skill);
-                    let flat_name = if used_names.contains(&base_name) {
-                        // 冲突：使用 技能名-应用名 格式
-                        make_conflict_skill_name(&skill, &app.id, &mut used_names)
-                    } else {
-                        make_flat_skill_name(&skill, &app.id, &mut used_names)
-                    };
-                    
+
+                    // 如果同步目录里已经有同名文件/目录，说明是上次同步的结果，
+                    // 直接复用该名称，跳过复制，避免重复生成 技能名-应用名 副本。
+                    if used_names.contains(&base_name) {
+                        let existing_target = repo.join(&base_name);
+                        if existing_target.exists() {
+                            written_entries.push(base_name);
+                            continue;
+                        }
+                    }
+
+                    let flat_name = make_flat_skill_name(&skill, &app.id, &mut used_names);
+
                     let target = repo.join(&flat_name);
                     let target_real = target.canonicalize().unwrap_or(target.clone());
                     if source_real == target_real {
@@ -1827,21 +1768,79 @@ fn git_pull(repo_path: String) -> Result<String, String> {
 
     let repo = PathBuf::from(&repo_path);
     ensure_repo_initialized(&repo, &app_config.git_config)?;
-    let stashed = stash_local_changes_if_needed(&repo, "pull")?;
-    run_git(
+    
+    let has_commit = repo_has_any_commit(&repo)?;
+
+    if !has_commit {
+        let branch = app_config.git_config.branch.trim().to_string();
+
+        // Commit whatever local skills already exist so they are preserved.
+        run_git(&repo, &["add", "."])?;
+        let _ = commit_repo_changes(&repo)?;
+
+        // Fetch remote content.
+        run_git(&repo, &["fetch", "origin", &branch])?;
+
+        let fetch_head = repo.join(".git/FETCH_HEAD");
+        if fetch_head.exists() {
+            // Merge remote history into the local initial commit so that
+            // local skills (5) and remote skills (10) are combined (15).
+            // --allow-unrelated-histories is required because the two trees
+            // have no common ancestor yet.
+            let merge_result = run_git(
+                &repo,
+                &[
+                    "merge",
+                    "--allow-unrelated-histories",
+                    "--no-edit",
+                    "FETCH_HEAD",
+                ],
+            );
+
+            if let Err(e) = merge_result {
+                // Surface a clear message if there are genuine conflicts.
+                return Err(format!("合并远程内容时发生冲突，请手动解决后重试: {}", e));
+            }
+
+            // Align the local branch name with the configured branch.
+            let _ = run_git(&repo, &["branch", "-M", &branch]);
+        }
+
+        return Ok("已将本地 skills 与远程仓库合并".to_string());
+    }
+    
+    let branch = app_config.git_config.branch.trim().to_string();
+
+    // Commit any local changes first so nothing is lost.
+    // We intentionally avoid `git stash` here because it fails when the
+    // working tree contains symlinks or files with unusual permissions
+    // (error: "could not write index").
+    let had_local_changes = repo_has_local_changes(&repo)?;
+    if had_local_changes {
+        run_git(&repo, &["add", "."])?;
+        let _ = commit_repo_changes(&repo)?;
+    }
+
+    // Fetch then merge so that local commits and remote commits are combined.
+    // --allow-unrelated-histories handles the case where the two trees have
+    // diverged (e.g. local was initialised independently of the remote).
+    run_git(&repo, &["fetch", "origin", &branch])?;
+
+    let merge_result = run_git(
         &repo,
         &[
-            "pull",
-            "--rebase",
-            "origin",
-            app_config.git_config.branch.trim(),
+            "merge",
+            "--allow-unrelated-histories",
+            "--no-edit",
+            &format!("origin/{}", branch),
         ],
-    )?;
-    Ok(if stashed {
-        "已暂存本地未提交改动，并从远程仓库恢复最新 skills".to_string()
-    } else {
-        "已从远程仓库拉取最新内容".to_string()
-    })
+    );
+
+    if let Err(e) = merge_result {
+        return Err(format!("合并远程内容时发生冲突，请手动解决后重试: {}", e));
+    }
+
+    Ok("已从远程仓库拉取最新内容".to_string())
 }
 
 #[tauri::command]
@@ -1854,27 +1853,44 @@ fn git_sync(repo_path: String) -> Result<String, String> {
     let repo = PathBuf::from(&repo_path);
     ensure_repo_initialized(&repo, &app_config.git_config)?;
 
-    let stashed = stash_local_changes_if_needed(&repo, "sync")?;
-    run_git(
-        &repo,
-        &[
-            "pull",
-            "--rebase",
-            "origin",
-            app_config.git_config.branch.trim(),
-        ],
-    )?;
+    let branch = app_config.git_config.branch.trim().to_string();
+    let has_commit = repo_has_any_commit(&repo)?;
+
+    if !has_commit {
+        // No local commits yet — commit existing files first, then merge remote.
+        run_git(&repo, &["add", "."])?;
+        let _ = commit_repo_changes(&repo)?;
+
+        run_git(&repo, &["fetch", "origin", &branch])?;
+
+        let fetch_head = repo.join(".git/FETCH_HEAD");
+        if fetch_head.exists() {
+            let _ = run_git(
+                &repo,
+                &["merge", "--allow-unrelated-histories", "--no-edit", "FETCH_HEAD"],
+            );
+            let _ = run_git(&repo, &["branch", "-M", &branch]);
+        }
+    } else {
+        // Commit any local changes before fetching so stash is never needed.
+        if repo_has_local_changes(&repo)? {
+            run_git(&repo, &["add", "."])?;
+            let _ = commit_repo_changes(&repo)?;
+        }
+        run_git(&repo, &["fetch", "origin", &branch])?;
+        let _ = run_git(
+            &repo,
+            &["merge", "--allow-unrelated-histories", "--no-edit", &format!("origin/{}", branch)],
+        );
+    }
+    
     sync_to_git(repo_path.clone())?;
     let _ = commit_repo_changes(&repo)?;
     run_git(
         &repo,
-        &["push", "-u", "origin", app_config.git_config.branch.trim()],
+        &["push", "-u", "origin", &branch],
     )?;
-    Ok(if stashed {
-        "已暂存本地未提交改动，完成拉取、同步并推送到远程仓库".to_string()
-    } else {
-        "已完成拉取、同步并推送到远程仓库".to_string()
-    })
+    Ok("已完成拉取、同步并推送到远程仓库".to_string())
 }
 
 #[tauri::command]
@@ -2133,6 +2149,11 @@ fn figma_find_nodes_by_name(
 }
 
 #[tauri::command]
+fn scan_git_path_skills(path: String) -> Result<Vec<SkillFile>, String> {
+    collect_skill_entries(Path::new(&path))
+}
+
+#[tauri::command]
 fn save_figma_api_key(api_key: String) -> Result<(), String> {
     let mut config = load_config();
     config.figma_api_key = Some(api_key);
@@ -2150,6 +2171,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             scan_apps,
             scan_skills,
+            scan_git_path_skills,
             rename_skill,
             delete_skill,
             sync_to_git,

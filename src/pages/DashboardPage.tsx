@@ -19,6 +19,7 @@ import {
   gitSync,
   linkApp,
   loadSkillInventory,
+  scanGitPathSkills,
   launchApp,
   openPathInFileManager,
   renameSkill,
@@ -45,6 +46,7 @@ export default function DashboardPage() {
   const [activeTab, setActiveTab] = useState<TabKey>('applications')
   const [apps, setApps] = useState<AppRecord[]>([])
   const [skills, setSkills] = useState<SkillRecord[]>([])
+  const [gitSkillCount, setGitSkillCount] = useState(0)
   const [gitPath, setGitPath] = useState('')
   const [gitConfig, setGitConfig] = useState<GitSyncConfig>({ repoUrl: '', username: '', branch: 'main' })
   const [loading, setLoading] = useState(true)
@@ -77,6 +79,13 @@ export default function DashboardPage() {
       setGitPath(appState.gitPath)
       setGitConfig(configState)
       setSkills(await loadSkillInventory(appState.apps))
+
+      if (appState.gitPath) {
+        const gitSkills = await scanGitPathSkills(appState.gitPath).catch(() => [])
+        setGitSkillCount(gitSkills.length)
+      } else {
+        setGitSkillCount(0)
+      }
 
       if (showToast) {
         notify(`扫描完成，共检测到 ${appState.apps.filter((app) => app.isInstalled).length} 个应用`, 'success')
@@ -127,11 +136,11 @@ export default function DashboardPage() {
   const stats = useMemo(() => {
     return {
       appCount: apps.filter((app) => app.isInstalled).length,
-      skillCount: skills.length,
+      skillCount: gitSkillCount,
       linkedCount: apps.filter((app) => app.isLinked).length,
       conflictCount: skills.filter((skill) => skill.conflicts).length,
     }
-  }, [apps, skills])
+  }, [apps, skills, gitSkillCount])
 
   async function handleToggleLink(app: AppRecord) {
     if (!app.isLinked && !gitPath) {
@@ -139,6 +148,11 @@ export default function DashboardPage() {
       return
     }
 
+    // Optimistic update — flip isLinked immediately so the UI responds at once
+    const nextLinked = !app.isLinked
+    setApps((prev) =>
+      prev.map((a) => (a.id === app.id ? { ...a, isLinked: nextLinked } : a)),
+    )
     setBusyAppId(app.id)
 
     try {
@@ -149,13 +163,31 @@ export default function DashboardPage() {
         await linkApp(app.id, gitPath)
         notify(`已创建 ${app.name} 的软链接`, 'success')
       }
-
-      await refreshData()
     } catch (error) {
+      // Roll back the optimistic update on failure
+      setApps((prev) =>
+        prev.map((a) => (a.id === app.id ? { ...a, isLinked: app.isLinked } : a)),
+      )
       notify(`操作失败: ${String(error)}`, 'error')
-    } finally {
       setBusyAppId(null)
+      return
     }
+
+    setBusyAppId(null)
+
+    // Refresh app list and skill inventory in the background — UI is already updated
+    scanApps()
+      .then((appState) => {
+        setApps(appState.apps)
+        setGitPath(appState.gitPath)
+        return loadSkillInventory(appState.apps)
+      })
+      .then((updatedSkills) => {
+        setSkills(updatedSkills)
+      })
+      .catch(() => {
+        // Background refresh failed — not critical, user already got the toast
+      })
   }
 
   async function handleOpenAppFolder(app: AppRecord) {

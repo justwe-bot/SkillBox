@@ -40,6 +40,10 @@ export async function scanApps() {
   }
 }
 
+export function scanGitPathSkills(path: string) {
+  return invoke<BackendSkillFile[]>('scan_git_path_skills', { path })
+}
+
 export function scanSkills(appId: string) {
   return invoke<BackendSkillFile[]>('scan_skills', { appId })
 }

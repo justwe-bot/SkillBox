@@ -1091,41 +1091,10 @@ fn copy_path_recursive(source: &Path, target: &Path) -> Result<(), String> {
     }
 }
 
-fn load_sync_manifest(repo_path: &Path) -> Vec<String> {
-    let manifest_path = repo_path.join(SYNC_MANIFEST_FILE);
-    if !manifest_path.exists() {
-        return Vec::new();
-    }
-
-    fs::read_to_string(&manifest_path)
-        .ok()
-        .and_then(|content| serde_json::from_str::<Vec<String>>(&content).ok())
-        .unwrap_or_default()
-}
-
 fn save_sync_manifest(repo_path: &Path, entries: &[String]) -> Result<(), String> {
     let manifest_path = repo_path.join(SYNC_MANIFEST_FILE);
     let content = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
     fs::write(manifest_path, content).map_err(|e| e.to_string())
-}
-
-fn remove_path_if_exists(path: &Path) -> Result<(), String> {
-    if !path.exists() {
-        return Ok(());
-    }
-
-    let metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-    if metadata.file_type().is_symlink() {
-        return fs::remove_file(path)
-            .or_else(|_| fs::remove_dir(path))
-            .map_err(|e| e.to_string());
-    }
-
-    if metadata.is_dir() {
-        fs::remove_dir_all(path).map_err(|e| e.to_string())
-    } else {
-        fs::remove_file(path).map_err(|e| e.to_string())
-    }
 }
 
 fn make_flat_skill_name(
@@ -1648,22 +1617,13 @@ fn sync_to_git(repo_path: String) -> Result<(), String> {
 
     let _config = load_config();
     let apps = scan_apps().map_err(|e| e)?;
-    let previous_entries = load_sync_manifest(&repo);
-    for entry in previous_entries {
-        remove_path_if_exists(&repo.join(entry))?;
-    }
-
-    for app in build_known_apps() {
-        let legacy_dir = repo.join(&app.id);
-        if legacy_dir.exists() {
-            remove_path_if_exists(&legacy_dir)?;
-        }
-    }
+    let repo_real = repo.canonicalize().unwrap_or(repo.clone());
 
     let mut written_entries = Vec::new();
     let mut used_names = std::collections::HashSet::new();
-    let repo_real = repo.canonicalize().unwrap_or(repo.clone());
     let mut seen_skill_dirs = std::collections::HashSet::new();
+
+    // 收集同步目录中已有的技能名称
     if let Ok(existing_entries) = fs::read_dir(&repo) {
         for entry in existing_entries.filter_map(Result::ok) {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -1678,6 +1638,7 @@ fn sync_to_git(repo_path: String) -> Result<(), String> {
             let skill_dir = PathBuf::from(&app.path);
             if skill_dir.exists() {
                 let skill_dir_real = skill_dir.canonicalize().unwrap_or(skill_dir.clone());
+                // 跳过软链接应用（技能已在同步目录中）
                 if skill_dir_real == repo_real || skill_dir_real.starts_with(&repo_real) {
                     continue;
                 }
@@ -1708,6 +1669,11 @@ fn sync_to_git(repo_path: String) -> Result<(), String> {
                 }
             }
         }
+    }
+
+    // 将同步目录中已有的技能也加入 manifest
+    for name in used_names {
+        written_entries.push(name);
     }
 
     written_entries.sort();

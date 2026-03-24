@@ -8,6 +8,8 @@ from PIL import Image, ImageDraw
 BACKGROUND = (6, 6, 26, 255)
 FOREGROUND = (255, 255, 255, 255)
 RENDER_SCALE = 8
+BACKGROUND_PAD_RATIO = 0.035
+BACKGROUND_RADIUS_RATIO = 0.24
 
 
 def polygon(points, scale, offset_x, offset_y):
@@ -65,8 +67,10 @@ def create_icon(size: int) -> Image.Image:
     logo_layer = Image.new("RGBA", (render_size, render_size), (0, 0, 0, 0))
     logo_draw = ImageDraw.Draw(logo_layer, "RGBA")
 
-    pad = max(1, round(render_size * 0.09))
-    radius = round(render_size * 0.24)
+    # Keep the icon nearly full-bleed so macOS bundle icons match the larger
+    # appearance we see during development instead of looking inset on a plate.
+    pad = max(1, round(render_size * BACKGROUND_PAD_RATIO))
+    radius = round(render_size * BACKGROUND_RADIUS_RATIO)
 
     base_draw.rounded_rectangle(
         [pad, pad, render_size - pad, render_size - pad],

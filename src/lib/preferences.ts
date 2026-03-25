@@ -9,6 +9,7 @@ export const defaultPreferences: AppPreferences = {
   desktopNotifications: true,
   theme: 'system',
   language: 'zh-CN',
+  onboardingCompleted: false,
 }
 
 export function loadPreferences(): AppPreferences {
@@ -25,6 +26,15 @@ export function loadPreferences(): AppPreferences {
 
     if (!parsed.language) {
       next.language = resolveInitialLanguage()
+    }
+
+    // Existing users may have preferences stored before onboarding was added.
+    // Treat them as already onboarded so only true first-time installs see the guide.
+    if (!Object.prototype.hasOwnProperty.call(parsed, 'onboardingCompleted')) {
+      next.onboardingCompleted = true
+    }
+
+    if (!parsed.language || !Object.prototype.hasOwnProperty.call(parsed, 'onboardingCompleted')) {
       savePreferences(next)
     }
 

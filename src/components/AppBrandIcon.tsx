@@ -35,12 +35,10 @@ function MonogramIcon({ appName }: { appName: string }) {
 }
 
 const BRAND_ICON_PATHS: Record<string, string> = {
-  aider: '/brand-icons/unified/aider.png',
   claude: '/brand-icons/unified/claude.png',
   cline: '/brand-icons/unified/cline.png',
   codebuddy: '/brand-icons/unified/codebuddy.png',
   codex: '/brand-icons/unified/codex.png',
-  continue: '/brand-icons/unified/continue.png',
   copilot: '/brand-icons/unified/copilot.png',
   cursor: '/brand-icons/unified/cursor.png',
   gemini: '/brand-icons/unified/gemini.png',
@@ -48,6 +46,7 @@ const BRAND_ICON_PATHS: Record<string, string> = {
   openclaw: '/brand-icons/unified/openclaw.png',
   opencode: '/brand-icons/unified/opencode.png',
   qoder: '/brand-icons/unified/qoder.png',
+  roocode: '/brand-icons/unified/roocode.png',
   trae: '/brand-icons/unified/trae.png',
   windsurf: '/brand-icons/unified/windsurf.png',
 }

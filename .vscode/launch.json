@@ -1,0 +1,42 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "SkillBox: 启动前端 Dev Server",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "npm run dev"
+    },
+    {
+      "name": "SkillBox: 调试前端 (Chrome)",
+      "type": "pwa-chrome",
+      "request": "launch",
+      "url": "http://localhost:1420",
+      "webRoot": "${workspaceFolder}",
+      "sourceMaps": true
+    },
+    {
+      "name": "SkillBox: 附加前端 (Chrome 9222)",
+      "type": "pwa-chrome",
+      "request": "attach",
+      "port": 9222,
+      "webRoot": "${workspaceFolder}"
+    },
+    {
+      "name": "SkillBox: 启动 Tauri 开发",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "npm run tauri dev"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "SkillBox: 前端一键调试",
+      "configurations": [
+        "SkillBox: 启动前端 Dev Server",
+        "SkillBox: 调试前端 (Chrome)"
+      ],
+      "stopAll": true
+    }
+  ]
+}

@@ -20,6 +20,7 @@ import {
   Plus,
   RefreshCcw,
   Save,
+  Star,
   Sun,
 } from 'lucide-react'
 import { FigmaSkillIcon } from '../components/FigmaSkillIcon'
@@ -367,6 +368,14 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleOpenStarPage() {
+    try {
+      await openExternal(repoUrl)
+    } catch (error) {
+      notify(t('settings.notifications.openRepositoryFailed', { error: String(error) }), 'error')
+    }
+  }
+
   return (
     <div className="page-shell">
       <header className="hero hero--settings">
@@ -675,6 +684,14 @@ export default function SettingsPage() {
               </div>
             ) : null}
             <div className="settings-actions-row">
+              <button
+                className="button button--primary settings-repo-button settings-repo-button--star"
+                type="button"
+                onClick={() => void handleOpenStarPage()}
+              >
+                <Star size={16} />
+                {t('settings.about.starRepository')}
+              </button>
               <button className="button button--ghost settings-repo-button" type="button" onClick={() => void handleCheckUpdates()} disabled={checkingUpdates || downloadingUpdate}>
                 <RefreshCcw size={16} />
                 {checkingUpdates ? t('settings.about.checking') : t('settings.about.checkForUpdates')}

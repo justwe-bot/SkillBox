@@ -9,13 +9,16 @@ interface GitPanelProps {
   gitPath: string
   gitConfig: GitSyncConfig
   busyAction: GitBusyAction
+  pushTitle: string
+  pullTitle: string
+  syncTitle: string
   onSaveConfig: (config: GitSyncConfig) => void
   onPush: () => void
   onPull: () => void
   onSync: () => void
 }
 
-export function GitPanel({ gitPath, gitConfig, busyAction, onSaveConfig, onPush, onPull, onSync }: GitPanelProps) {
+export function GitPanel({ gitPath, gitConfig, busyAction, pushTitle, pullTitle, syncTitle, onSaveConfig, onPush, onPull, onSync }: GitPanelProps) {
   const { t } = useI18n()
   const [repoUrl, setRepoUrl] = useState(gitConfig.repoUrl)
   const [username, setUsername] = useState(gitConfig.username)
@@ -34,16 +37,6 @@ export function GitPanel({ gitPath, gitConfig, busyAction, onSaveConfig, onPush,
   const pushBusy = busyAction === 'push'
   const pullBusy = busyAction === 'pull'
   const syncBusy = busyAction === 'sync'
-  const busyLabel =
-    busyAction === 'saveConfig'
-      ? t('git.busy.saveConfig')
-      : busyAction === 'push'
-        ? t('git.busy.push')
-        : busyAction === 'pull'
-          ? t('git.busy.pull')
-          : busyAction === 'sync'
-            ? t('git.busy.sync')
-            : t('git.busy.default')
 
   return (
     <section className="surface side-panel side-panel--git">
@@ -58,13 +51,6 @@ export function GitPanel({ gitPath, gitConfig, busyAction, onSaveConfig, onPush,
       </div>
 
       <div className="git-panel__body">
-        {gitBusy ? (
-          <div className="git-panel__overlay" aria-live="polite" aria-busy="true">
-            <RefreshCw size={20} className="spin" />
-            <span>{busyLabel}</span>
-          </div>
-        ) : null}
-
         <div className="field-group">
           <label htmlFor="git-path">{t('git.repoUrl')}</label>
           <input
@@ -114,15 +100,15 @@ export function GitPanel({ gitPath, gitConfig, busyAction, onSaveConfig, onPush,
         {!gitPath ? <p className="git-panel__hint">{t('git.selectDirectoryHint')}</p> : null}
 
         <div className="git-panel__actions">
-          <button className="button button--primary git-action" type="button" onClick={onPush} disabled={gitBusy || !canRunGitActions}>
+          <button className="button button--primary git-action" type="button" onClick={onPush} disabled={gitBusy || !canRunGitActions} title={pushTitle}>
             {pushBusy ? <RefreshCw size={17} className="spin" /> : <Upload size={17} />}
             {pushBusy ? t('git.pushBusy') : t('git.push')}
           </button>
-          <button className="button button--card git-action" type="button" onClick={onPull} disabled={gitBusy || !canRunGitActions}>
+          <button className="button button--card git-action" type="button" onClick={onPull} disabled={gitBusy || !canRunGitActions} title={pullTitle}>
             {pullBusy ? <RefreshCw size={17} className="spin" /> : <Download size={17} />}
             {pullBusy ? t('git.pullBusy') : t('git.pull')}
           </button>
-          <button className="button button--card git-action" type="button" onClick={onSync} disabled={gitBusy || !canRunGitActions}>
+          <button className="button button--card git-action" type="button" onClick={onSync} disabled={gitBusy || !canRunGitActions} title={syncTitle}>
             <RefreshCw size={17} className={syncBusy ? 'spin' : ''} />
             {syncBusy ? t('git.syncBusy') : t('git.sync')}
           </button>

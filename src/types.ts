@@ -76,6 +76,7 @@ export interface AppPreferences {
   desktopNotifications: boolean
   theme: 'system' | 'light' | 'dark'
   language: AppLanguage
+  onboardingCompleted: boolean
 }
 
 export interface UpdateCheckResult {

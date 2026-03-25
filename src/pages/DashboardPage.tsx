@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { open as openDialog } from '@tauri-apps/api/dialog'
-import { Archive, FolderOpen, FolderPlus, RefreshCw, Scan, Search, Settings } from 'lucide-react'
+import { Archive, BookOpen, FolderOpen, FolderPlus, RefreshCw, Scan, Search, Settings } from 'lucide-react'
 import { ApplicationCard } from '../components/ApplicationCard'
 import { FigmaSkillIcon } from '../components/FigmaSkillIcon'
 import { GitPanel } from '../components/GitPanel'
@@ -11,6 +11,7 @@ import { SkillItem } from '../components/SkillItem'
 import { ThemeToggle } from '../components/ThemeToggle'
 import { LOCAL_SYNC_SOURCE, localizeBackendSuccessMessage, localizeSkillSource } from '../lib/i18n'
 import { useI18n } from '../lib/i18n-context'
+import { loadPreferences, savePreferences } from '../lib/preferences'
 import { useToast } from '../components/ToastProvider'
 import {
   addCustomApp,
@@ -38,6 +39,7 @@ import type { AppRecord, BackendSkillFile, GitSyncConfig, ManagedSkillEntry, Ski
 
 type TabKey = 'applications' | 'skills'
 type GitBusyAction = 'saveConfig' | 'push' | 'pull' | 'sync' | 'aggregate' | 'pickPath' | 'changePath' | null
+type ConfirmableGitAction = 'push' | 'pull' | 'sync' | 'aggregate'
 type SkillScanProgress = {
   completed: number
   total: number
@@ -48,11 +50,64 @@ type LinkBusyState = {
   appName: string
 }
 
+type DashboardSnapshot = {
+  activeTab: TabKey
+  apps: AppRecord[]
+  skills: SkillRecord[]
+  gitPath: string
+  gitConfig: GitSyncConfig
+  search: string
+}
+
 const SKILL_SCAN_BATCH_SIZE = 3
+const DASHBOARD_SNAPSHOT_KEY = 'skillbox.dashboard.snapshot'
+const GUIDE_STEP_COUNT = 5
+const GUIDE_HIGHLIGHT_DURATION_MS = 2200
+
+function loadDashboardSnapshot(): DashboardSnapshot | null {
+  try {
+    const rawValue = window.localStorage.getItem(DASHBOARD_SNAPSHOT_KEY)
+    if (!rawValue) {
+      return null
+    }
+
+    const parsed = JSON.parse(rawValue) as DashboardSnapshot
+    if (!parsed || !Array.isArray(parsed.apps) || !Array.isArray(parsed.skills)) {
+      return null
+    }
+
+    return {
+      activeTab: parsed.activeTab === 'skills' ? 'skills' : 'applications',
+      apps: parsed.apps,
+      skills: parsed.skills,
+      gitPath: parsed.gitPath ?? '',
+      gitConfig: parsed.gitConfig ?? { repoUrl: '', username: '', branch: 'main' },
+      search: parsed.search ?? '',
+    }
+  } catch {
+    return null
+  }
+}
+
+function saveDashboardSnapshot(snapshot: DashboardSnapshot) {
+  try {
+    window.localStorage.setItem(DASHBOARD_SNAPSHOT_KEY, JSON.stringify(snapshot))
+  } catch {
+    // Ignore cache persistence failures and keep the live UI usable.
+  }
+}
 
 function waitForNextPaint() {
   return new Promise<void>((resolve) => {
     requestAnimationFrame(() => resolve())
+  })
+}
+
+function waitForBusyOverlayPaint() {
+  return new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => resolve())
+    })
   })
 }
 
@@ -76,21 +131,24 @@ function mapGitPathSkillsToRecords(files: BackendSkillFile[], language: string):
 }
 
 export default function DashboardPage() {
+  const navigate = useNavigate()
   const { language, t } = useI18n()
   const { notify } = useToast()
-  const [activeTab, setActiveTab] = useState<TabKey>('applications')
-  const [apps, setApps] = useState<AppRecord[]>([])
-  const [skills, setSkills] = useState<SkillRecord[]>([])
-  const [gitPath, setGitPath] = useState('')
-  const [gitConfig, setGitConfig] = useState<GitSyncConfig>({ repoUrl: '', username: '', branch: 'main' })
-  const [appLoading, setAppLoading] = useState(true)
+  const cachedSnapshotRef = useRef<DashboardSnapshot | null>(loadDashboardSnapshot())
+  const initialPreferencesRef = useRef(loadPreferences())
+  const [activeTab, setActiveTab] = useState<TabKey>(() => cachedSnapshotRef.current?.activeTab ?? 'applications')
+  const [apps, setApps] = useState<AppRecord[]>(() => cachedSnapshotRef.current?.apps ?? [])
+  const [skills, setSkills] = useState<SkillRecord[]>(() => cachedSnapshotRef.current?.skills ?? [])
+  const [gitPath, setGitPath] = useState(() => cachedSnapshotRef.current?.gitPath ?? '')
+  const [gitConfig, setGitConfig] = useState<GitSyncConfig>(() => cachedSnapshotRef.current?.gitConfig ?? { repoUrl: '', username: '', branch: 'main' })
+  const [appLoading, setAppLoading] = useState(() => !cachedSnapshotRef.current)
   const [skillLoading, setSkillLoading] = useState(false)
   const [gitSkillLoading, setGitSkillLoading] = useState(false)
   const [skillScanProgress, setSkillScanProgress] = useState<SkillScanProgress>({ completed: 0, total: 0 })
   const [busyAppId, setBusyAppId] = useState<string | null>(null)
   const [linkBusyState, setLinkBusyState] = useState<LinkBusyState | null>(null)
   const [gitBusyAction, setGitBusyAction] = useState<GitBusyAction>(null)
-  const [search, setSearch] = useState('')
+  const [search, setSearch] = useState(() => cachedSnapshotRef.current?.search ?? '')
   const [customModalOpen, setCustomModalOpen] = useState(false)
   const [editModalOpen, setEditModalOpen] = useState(false)
   const [editingApp, setEditingApp] = useState<AppRecord | null>(null)
@@ -113,9 +171,18 @@ export default function DashboardPage() {
   const [manageSkillsSaving, setManageSkillsSaving] = useState(false)
   const [pendingGitPath, setPendingGitPath] = useState('')
   const [confirmGitPathOpen, setConfirmGitPathOpen] = useState(false)
+  const [pendingGitAction, setPendingGitAction] = useState<ConfirmableGitAction | null>(null)
+  const [onboardingCompleted, setOnboardingCompleted] = useState(() => initialPreferencesRef.current.onboardingCompleted)
+  const [guideOpen, setGuideOpen] = useState(() => !initialPreferencesRef.current.onboardingCompleted)
+  const [guideStepIndex, setGuideStepIndex] = useState(0)
+  const [highlightedArea, setHighlightedArea] = useState<'apps' | 'sync' | 'git' | null>(null)
   const gitBusy = gitBusyAction !== null
   const scanSessionRef = useRef(0)
   const scannedSkillListsRef = useRef<Map<string, { app: AppRecord; files: BackendSkillFile[] }>>(new Map())
+  const appsSectionRef = useRef<HTMLElement | null>(null)
+  const syncAreaRef = useRef<HTMLDivElement | null>(null)
+  const gitPanelRef = useRef<HTMLDivElement | null>(null)
+  const highlightTimerRef = useRef<number | null>(null)
 
   function beginScanSession() {
     const sessionId = scanSessionRef.current + 1
@@ -255,12 +322,30 @@ export default function DashboardPage() {
   }
 
   useEffect(() => {
-    void refreshData()
+    if (!cachedSnapshotRef.current) {
+      void refreshData()
+    }
 
     return () => {
+      if (highlightTimerRef.current !== null) {
+        window.clearTimeout(highlightTimerRef.current)
+      }
       scanSessionRef.current += 1
     }
   }, [language, notify, t])
+
+  useEffect(() => {
+    const snapshot = {
+      activeTab,
+      apps,
+      skills,
+      gitPath,
+      gitConfig,
+      search,
+    }
+    cachedSnapshotRef.current = snapshot
+    saveDashboardSnapshot(snapshot)
+  }, [activeTab, apps, gitConfig, gitPath, search, skills])
 
   const filteredSkills = useMemo(() => {
     const normalizedSkills = [...skills].sort((left, right) => left.name.localeCompare(right.name, language))
@@ -323,6 +408,8 @@ export default function DashboardPage() {
       conflictCount: skills.filter((skill) => skill.conflicts).length,
     }
   }, [apps, skills])
+  const linkedAppsCount = useMemo(() => apps.filter((app) => app.isLinked).length, [apps])
+  const managedAppsCount = useMemo(() => apps.filter((app) => app.isLinked && app.linkMode === 'managed').length, [apps])
 
   const heroText = useMemo(() => {
     if (appLoading) {
@@ -344,6 +431,64 @@ export default function DashboardPage() {
   }, [appLoading, gitSkillLoading, skillLoading, skillScanProgress.completed, skillScanProgress.total, t])
 
   const refreshButtonLabel = appLoading ? t('dashboard.refresh.loadingApps') : skillLoading ? t('dashboard.refresh.scanningSkills') : t('dashboard.refresh.default')
+  const gitActionCopy = useMemo<Record<ConfirmableGitAction, { label: string; description: string }>>(() => ({
+    aggregate: {
+      label: t('dashboard.gitAction.aggregate'),
+      description: t('dashboard.gitAction.aggregateDescription'),
+    },
+    push: {
+      label: t('dashboard.gitAction.push'),
+      description: t('dashboard.gitAction.pushDescription'),
+    },
+    pull: {
+      label: t('dashboard.gitAction.pull'),
+      description: t('dashboard.gitAction.pullDescription'),
+    },
+    sync: {
+      label: t('dashboard.gitAction.sync'),
+      description: t('dashboard.gitAction.syncDescription'),
+    },
+  }), [t])
+  const guideSteps = useMemo(() => {
+    return [
+      {
+        title: t('dashboard.guide.step1.title'),
+        description: t('dashboard.guide.step1.description'),
+        actionLabel: t('dashboard.guide.step1.action'),
+        isDone: Boolean(gitPath),
+        status: gitPath || t('dashboard.guide.pathUnset'),
+      },
+      {
+        title: t('dashboard.guide.step2.title'),
+        description: t('dashboard.guide.step2.description'),
+        actionLabel: t('dashboard.guide.step2.action'),
+        isDone: Boolean(gitPath) && skills.length > 0,
+        status: Boolean(gitPath) && skills.length > 0 ? t('dashboard.guide.skillsAggregated') : t('dashboard.guide.skillsPending'),
+      },
+      {
+        title: t('dashboard.guide.step3.title'),
+        description: t('dashboard.guide.step3.description'),
+        actionLabel: t('dashboard.guide.step3.action'),
+        isDone: linkedAppsCount > 0,
+        status: linkedAppsCount > 0 ? t('dashboard.guide.linkEnabled') : t('dashboard.guide.linkPending'),
+      },
+      {
+        title: t('dashboard.guide.step4.title'),
+        description: t('dashboard.guide.step4.description'),
+        actionLabel: t('dashboard.guide.step4.action'),
+        isDone: managedAppsCount > 0,
+        status: linkedAppsCount > 0 ? t('dashboard.guide.skillManageReady') : t('dashboard.guide.skillManagePending'),
+      },
+      {
+        title: t('dashboard.guide.step5.title'),
+        description: t('dashboard.guide.step5.description'),
+        actionLabel: t('dashboard.guide.step5.action'),
+        isDone: Boolean(gitConfig.repoUrl.trim()),
+        status: gitConfig.repoUrl.trim() || t('dashboard.guide.gitPending'),
+      },
+    ]
+  }, [gitConfig.repoUrl, gitPath, linkedAppsCount, managedAppsCount, skills.length, t])
+  const currentGuideStep = guideSteps[guideStepIndex]
   const activeOperationLabel = useMemo(() => {
     if (linkBusyState) {
       return linkBusyState.action === 'link'
@@ -381,6 +526,105 @@ export default function DashboardPage() {
 
     return null
   }, [gitBusyAction, linkBusyState, t])
+
+  function markOnboardingCompleted() {
+    if (onboardingCompleted) {
+      return
+    }
+
+    const nextPreferences = {
+      ...loadPreferences(),
+      onboardingCompleted: true,
+    }
+    savePreferences(nextPreferences)
+    setOnboardingCompleted(true)
+  }
+
+  function closeGuide() {
+    setGuideOpen(false)
+    markOnboardingCompleted()
+  }
+
+  function focusSection(
+    area: 'apps' | 'sync' | 'git',
+    ref: { current: HTMLElement | HTMLDivElement | null },
+    prepare?: () => void,
+  ) {
+    prepare?.()
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        setHighlightedArea(area)
+
+        if (highlightTimerRef.current !== null) {
+          window.clearTimeout(highlightTimerRef.current)
+        }
+
+        highlightTimerRef.current = window.setTimeout(() => {
+          setHighlightedArea(null)
+          highlightTimerRef.current = null
+        }, GUIDE_HIGHLIGHT_DURATION_MS)
+      })
+    })
+  }
+
+  function handleOpenGuide() {
+    setGuideStepIndex(0)
+    setGuideOpen(true)
+  }
+
+  function handleGuidePrevious() {
+    setGuideStepIndex((current) => Math.max(0, current - 1))
+  }
+
+  function handleGuideNext() {
+    if (guideStepIndex >= GUIDE_STEP_COUNT - 1) {
+      closeGuide()
+      return
+    }
+
+    setGuideStepIndex((current) => current + 1)
+  }
+
+  function handleGuideAction() {
+    closeGuide()
+
+    switch (guideStepIndex) {
+      case 0:
+        navigate('/settings')
+        break
+      case 1:
+        focusSection('sync', syncAreaRef)
+        break
+      case 2:
+      case 3:
+        focusSection('apps', appsSectionRef, () => setActiveTab('applications'))
+        break
+      case 4:
+        focusSection('git', gitPanelRef)
+        break
+      default:
+        break
+    }
+  }
+
+  function requestGitActionConfirmation(action: ConfirmableGitAction) {
+    if (gitBusy || !gitPath) {
+      notify(t('dashboard.notifications.chooseSyncDirFirst'), 'error')
+      return
+    }
+
+    setPendingGitAction(action)
+  }
+
+  function closeGitActionConfirmation() {
+    if (gitBusy) {
+      return
+    }
+
+    setPendingGitAction(null)
+  }
 
   async function handleToggleLink(app: AppRecord) {
     if (!app.isLinked && !gitPath) {
@@ -461,7 +705,7 @@ export default function DashboardPage() {
     }
 
     flushSync(() => setGitBusyAction('aggregate'))
-    await waitForNextPaint()
+    await waitForBusyOverlayPaint()
     try {
       await syncToGit(gitPath)
       await refreshData()
@@ -479,7 +723,7 @@ export default function DashboardPage() {
     }
 
     flushSync(() => setGitBusyAction('pickPath'))
-    await waitForNextPaint()
+    await waitForBusyOverlayPaint()
     const selected = await openDialog({
       directory: true,
       multiple: false,
@@ -500,7 +744,7 @@ export default function DashboardPage() {
     }
 
     flushSync(() => setGitBusyAction('changePath'))
-    await waitForNextPaint()
+    await waitForBusyOverlayPaint()
     try {
       await saveGitPath(pendingGitPath)
       await syncToGit(pendingGitPath)
@@ -523,7 +767,7 @@ export default function DashboardPage() {
     }
 
     flushSync(() => setGitBusyAction('sync'))
-    await waitForNextPaint()
+    await waitForBusyOverlayPaint()
     try {
       const message = await gitSync(gitPath)
       await refreshData()
@@ -542,7 +786,7 @@ export default function DashboardPage() {
     }
 
     flushSync(() => setGitBusyAction('push'))
-    await waitForNextPaint()
+    await waitForBusyOverlayPaint()
     try {
       await gitPush(gitPath)
       await refreshData()
@@ -561,7 +805,7 @@ export default function DashboardPage() {
     }
 
     flushSync(() => setGitBusyAction('pull'))
-    await waitForNextPaint()
+    await waitForBusyOverlayPaint()
     try {
       const message = await gitPull(gitPath)
       await refreshData()
@@ -579,7 +823,7 @@ export default function DashboardPage() {
     }
 
     flushSync(() => setGitBusyAction('saveConfig'))
-    await waitForNextPaint()
+    await waitForBusyOverlayPaint()
     try {
       await persistGitConfig(config)
       setGitConfig(config)
@@ -790,6 +1034,10 @@ export default function DashboardPage() {
             <Scan size={18} />
             {refreshButtonLabel}
           </button>
+          <button className="button button--ghost button--hero" type="button" onClick={handleOpenGuide}>
+            <BookOpen size={18} />
+            {t('dashboard.guide.open')}
+          </button>
           <ThemeToggle />
           <Link className="button button--square" to="/settings" aria-label={t('dashboard.openSettings')}>
             <Settings size={22} />
@@ -828,7 +1076,7 @@ export default function DashboardPage() {
       <main className="dashboard-grid">
         <section className="main-column">
           {activeTab === 'applications' ? (
-            <section className="stack">
+            <section ref={appsSectionRef} className={`stack guide-anchor ${highlightedArea === 'apps' ? 'guide-focus' : ''}`}>
               <div className="section-toolbar section-toolbar--applications">
                 <div className="tabs tabs--embedded">
                   <button className="tab tab--active" type="button" onClick={() => setActiveTab('applications')}>
@@ -919,18 +1167,30 @@ export default function DashboardPage() {
           )}
         </section>
 
-        <aside className="side-column">
-          <GitPanel
-            gitPath={gitPath}
-            gitConfig={gitConfig}
-            busyAction={gitBusyAction}
-            onSaveConfig={handleSaveGitConfig}
-            onPush={handlePush}
-            onPull={handlePull}
-            onSync={handleSync}
-          />
-          {gitPath ? (
-            <>
+        <aside className={`side-column ${gitBusy ? 'side-column--busy' : ''}`}>
+          {gitBusy ? (
+            <div className="side-column__overlay" aria-live="polite" aria-busy="true">
+              <RefreshCw size={20} className="spin" />
+              <span>{activeOperationLabel ?? t('git.busy.default')}</span>
+            </div>
+          ) : null}
+          <div ref={gitPanelRef} className={`guide-anchor ${highlightedArea === 'git' ? 'guide-focus' : ''}`}>
+            <GitPanel
+              gitPath={gitPath}
+              gitConfig={gitConfig}
+              busyAction={gitBusyAction}
+              pushTitle={gitActionCopy.push.description}
+              pullTitle={gitActionCopy.pull.description}
+              syncTitle={gitActionCopy.sync.description}
+              onSaveConfig={handleSaveGitConfig}
+              onPush={() => requestGitActionConfirmation('push')}
+              onPull={() => requestGitActionConfirmation('pull')}
+              onSync={() => requestGitActionConfirmation('sync')}
+            />
+          </div>
+          <div ref={syncAreaRef} className={`guide-anchor guide-anchor--stack ${highlightedArea === 'sync' ? 'guide-focus' : ''}`}>
+            {gitPath ? (
+              <>
               <div className="surface side-column__path-card">
                 <div className="side-column__path-actions">
                   <button
@@ -959,28 +1219,86 @@ export default function DashboardPage() {
                 <button
                   className="button button--primary side-column__path-primary"
                   type="button"
-                  onClick={() => void handleAggregateSkills()}
+                  onClick={() => requestGitActionConfirmation('aggregate')}
                   disabled={gitBusy}
+                  title={gitActionCopy.aggregate.description}
                 >
                   {gitBusyAction === 'aggregate' ? <RefreshCw size={17} className="spin" /> : <Archive size={17} />}
                   {gitBusyAction === 'aggregate' ? t('dashboard.side.aggregateLoading') : t('dashboard.side.aggregate')}
                 </button>
               </div>
-            </>
-          ) : null}
-          {!gitPath ? (
-            <button
-              className="button button--ghost button--full side-column__picker"
-              type="button"
-              onClick={() => void handlePickGitFolder()}
-              disabled={gitBusy}
-            >
-              {gitBusyAction === 'pickPath' ? <RefreshCw size={16} className="spin" /> : null}
-              {gitBusyAction === 'pickPath' ? t('dashboard.side.pickDirectoryLoading') : t('dashboard.side.pickDirectory')}
-            </button>
-          ) : null}
+              </>
+            ) : null}
+            {!gitPath ? (
+              <button
+                className="button button--ghost button--full side-column__picker"
+                type="button"
+                onClick={() => void handlePickGitFolder()}
+                disabled={gitBusy}
+              >
+                {gitBusyAction === 'pickPath' ? <RefreshCw size={16} className="spin" /> : null}
+                {gitBusyAction === 'pickPath' ? t('dashboard.side.pickDirectoryLoading') : t('dashboard.side.pickDirectory')}
+              </button>
+            ) : null}
+          </div>
         </aside>
       </main>
+
+      <Modal open={guideOpen} title={t('dashboard.guide.title')} onClose={closeGuide} className="modal--guide">
+        <div className="modal__body modal__body--stack guide-modal">
+          <div className="guide-modal__intro">
+            <div>
+              <p className="guide-modal__progress">{t('dashboard.guide.progress', { current: guideStepIndex + 1, total: GUIDE_STEP_COUNT })}</p>
+              <h3>{currentGuideStep.title}</h3>
+            </div>
+            <span className={`guide-modal__badge ${currentGuideStep.isDone ? 'guide-modal__badge--done' : ''}`}>
+              {currentGuideStep.isDone ? t('dashboard.guide.status.done') : t('dashboard.guide.status.todo')}
+            </span>
+          </div>
+          <p className="modal__copy">{t('dashboard.guide.subtitle')}</p>
+
+          <div className="guide-modal__layout">
+            <div className="guide-modal__steps">
+              {guideSteps.map((step, index) => (
+                <button
+                  key={step.title}
+                  className={`guide-step ${index === guideStepIndex ? 'guide-step--active' : ''}`}
+                  type="button"
+                  onClick={() => setGuideStepIndex(index)}
+                >
+                  <span className="guide-step__index">{index + 1}</span>
+                  <span className="guide-step__copy">
+                    <strong>{step.title}</strong>
+                    <small>{step.isDone ? t('dashboard.guide.status.done') : t('dashboard.guide.status.todo')}</small>
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            <section className="surface guide-card">
+              <div className="guide-card__status">
+                <span>{t('dashboard.guide.currentStatus')}</span>
+                <strong>{currentGuideStep.status}</strong>
+              </div>
+              <p className="guide-card__description">{currentGuideStep.description}</p>
+              <button className="button button--primary" type="button" onClick={handleGuideAction}>
+                {currentGuideStep.actionLabel}
+              </button>
+            </section>
+          </div>
+        </div>
+        <footer className="modal__footer">
+          <button className="button button--ghost" type="button" onClick={closeGuide}>
+            {t('common.close')}
+          </button>
+          <button className="button button--ghost" type="button" onClick={handleGuidePrevious} disabled={guideStepIndex === 0}>
+            {t('dashboard.guide.previous')}
+          </button>
+          <button className="button button--primary" type="button" onClick={handleGuideNext}>
+            {guideStepIndex === GUIDE_STEP_COUNT - 1 ? t('dashboard.guide.finish') : t('dashboard.guide.next')}
+          </button>
+        </footer>
+      </Modal>
 
       <Modal open={customModalOpen} title={t('dashboard.dialog.addCustomApp')} onClose={() => setCustomModalOpen(false)}>
         <div className="modal__body">
@@ -1159,22 +1477,20 @@ export default function DashboardPage() {
             <div className="manage-skills__list">
               {filteredManageSkills.map((skill) => (
                 <article key={skill.entryName} className={`surface manage-skills__item ${skill.enabled ? 'manage-skills__item--enabled' : ''}`}>
-                  <label className="manage-skills__item-main">
-                    <input
-                      className="manage-skills__checkbox"
-                      type="checkbox"
-                      checked={skill.enabled}
-                      onChange={() => handleToggleManagedSkill(skill.entryName)}
-                    />
+                  <div className="manage-skills__item-main">
                     <div className="manage-skills__item-copy">
                       <strong>{skill.name}</strong>
                       <span>{skill.description || skill.entryName}</span>
                       <small>{skill.entryName}</small>
                     </div>
-                  </label>
-                  <span className="manage-skills__status">
+                  </div>
+                  <button
+                    className={`manage-skills__toggle ${skill.enabled ? 'manage-skills__toggle--enabled' : ''}`}
+                    type="button"
+                    onClick={() => handleToggleManagedSkill(skill.entryName)}
+                  >
                     {skill.enabled ? t('dashboard.dialog.enabled') : t('dashboard.dialog.disabled')}
-                  </span>
+                  </button>
                 </article>
               ))}
             </div>
@@ -1286,6 +1602,66 @@ export default function DashboardPage() {
           </button>
           <button className="button button--primary" type="button" onClick={() => void handleConfirmGitFolderChange()} disabled={gitBusyAction === 'changePath'}>
             {gitBusyAction === 'changePath' ? t('dashboard.dialog.syncing') : t('dashboard.dialog.confirmAndSync')}
+          </button>
+        </footer>
+      </Modal>
+
+      <Modal open={pendingGitAction !== null} title={t('dashboard.dialog.confirmGitAction')} onClose={closeGitActionConfirmation}>
+        <div className="modal__body modal__body--stack">
+          <p className="modal__copy">{t('dashboard.dialog.confirmGitActionMessage')}</p>
+          {pendingGitAction ? (
+            <div className="detail-grid">
+              <div className="detail-field">
+                <span>{t('dashboard.dialog.gitActionLabel')}</span>
+                <strong>{gitActionCopy[pendingGitAction].label}</strong>
+              </div>
+              <div className="detail-field">
+                <span>{t('dashboard.dialog.gitActionDescriptionLabel')}</span>
+                <strong>{gitActionCopy[pendingGitAction].description}</strong>
+              </div>
+              {gitPath ? (
+                <div className="detail-field">
+                  <span>{t('common.targetDirectory')}</span>
+                  <strong className="detail-field__path">{gitPath}</strong>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+        <footer className="modal__footer">
+          <button className="button button--ghost" type="button" onClick={closeGitActionConfirmation} disabled={gitBusy}>
+            {t('common.cancel')}
+          </button>
+          <button
+            className="button button--primary"
+            type="button"
+            onClick={() => {
+              const action = pendingGitAction
+              setPendingGitAction(null)
+              if (!action) {
+                return
+              }
+
+              if (action === 'aggregate') {
+                void handleAggregateSkills()
+                return
+              }
+
+              if (action === 'push') {
+                void handlePush()
+                return
+              }
+
+              if (action === 'pull') {
+                void handlePull()
+                return
+              }
+
+              void handleSync()
+            }}
+            disabled={gitBusy}
+          >
+            {t('dashboard.dialog.confirmGitActionButton')}
           </button>
         </footer>
       </Modal>

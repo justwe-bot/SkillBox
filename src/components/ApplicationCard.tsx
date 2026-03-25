@@ -99,7 +99,7 @@ export function ApplicationCard({
       </div>
 
       <div className="card-app__details">
-        <div>
+        <div className="card-app__details-main">
           <div className="card-app__count">
             <AnimatedNumber
               value={displaySkillCount}
@@ -107,6 +107,11 @@ export function ApplicationCard({
             />
             <span className="card-app__count-unit">{t('dashboard.card.skillUnit')}</span>
           </div>
+          {app.isLinked ? (
+            <button className="button button--ghost card-app__manage-button" type="button" onClick={() => onManageSkills(app)} disabled={busy}>
+              {t('dashboard.card.manageSkills')}
+            </button>
+          ) : null}
         </div>
         <button
           className={`switch-pill ${app.isLinked ? 'switch-pill--on' : ''}`}
@@ -128,12 +133,6 @@ export function ApplicationCard({
         <button className="button button--card button--full" type="button" onClick={() => onEditPath(app)} disabled={busy}>
           <FolderOpen size={18} />
           {t('dashboard.card.loadSkillsFromPath')}
-        </button>
-      ) : null}
-
-      {app.isLinked ? (
-        <button className="button button--ghost button--full card-app__manage-button" type="button" onClick={() => onManageSkills(app)} disabled={busy}>
-          {t('dashboard.card.manageSkills')}
         </button>
       ) : null}
     </article>

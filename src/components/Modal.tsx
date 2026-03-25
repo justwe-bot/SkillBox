@@ -5,9 +5,10 @@ interface ModalProps extends PropsWithChildren {
   open: boolean
   title: string
   onClose: () => void
+  className?: string
 }
 
-export function Modal({ open, title, onClose, children }: ModalProps) {
+export function Modal({ open, title, onClose, className, children }: ModalProps) {
   const { t } = useI18n()
 
   if (!open) {
@@ -17,7 +18,7 @@ export function Modal({ open, title, onClose, children }: ModalProps) {
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
       <section
-        className="modal"
+        className={className ? `modal ${className}` : 'modal'}
         role="dialog"
         aria-modal="true"
         aria-label={title}

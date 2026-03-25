@@ -33,6 +33,8 @@ xattr -dr com.apple.quarantine /Applications/SkillBox.app
 5. 配置 Git 仓库地址、用户名和分支后，执行推送、拉取或同步
 6. 根据需要为支持的应用创建或取消软链接
 
+说明：从当前版本开始，本地同步目录主要作为 SkillBox 的工作区使用；Git 操作会在该目录下的隐藏子目录 `.skillbox-git` 中执行，再与工作区做受控同步，避免“汇总技能”和 Git 拉取/合并直接在同一目录里互相冲突。
+
 ## 常见应用技能目录
 
 | 应用 | 默认路径 |

@@ -21,12 +21,10 @@ interface GitPanelProps {
 export function GitPanel({ gitPath, gitConfig, busyAction, pushTitle, pullTitle, syncTitle, onSaveConfig, onPush, onPull, onSync }: GitPanelProps) {
   const { t } = useI18n()
   const [repoUrl, setRepoUrl] = useState(gitConfig.repoUrl)
-  const [username, setUsername] = useState(gitConfig.username)
   const [branch, setBranch] = useState(gitConfig.branch)
 
   useEffect(() => {
     setRepoUrl(gitConfig.repoUrl)
-    setUsername(gitConfig.username)
     setBranch(gitConfig.branch)
   }, [gitConfig])
 
@@ -62,27 +60,15 @@ export function GitPanel({ gitPath, gitConfig, busyAction, pushTitle, pullTitle,
           />
         </div>
 
-        <div className="git-panel__row">
-          <div className="field-group">
-            <label htmlFor="git-username">{t('git.username')}</label>
-            <input
-              id="git-username"
-              value={username}
-              onChange={(event) => setUsername(event.target.value)}
-              placeholder="username"
-              disabled={gitBusy}
-            />
-          </div>
-          <div className="field-group">
-            <label htmlFor="git-branch">{t('git.branch')}</label>
-            <input id="git-branch" value={branch} onChange={(event) => setBranch(event.target.value)} placeholder="main" disabled={gitBusy} />
-          </div>
+        <div className="field-group">
+          <label htmlFor="git-branch">{t('git.branch')}</label>
+          <input id="git-branch" value={branch} onChange={(event) => setBranch(event.target.value)} placeholder="main" disabled={gitBusy} />
         </div>
 
         <button
           className="button button--card button--full git-panel__save"
           type="button"
-          onClick={() => onSaveConfig({ repoUrl, username, branch })}
+          onClick={() => onSaveConfig({ repoUrl, branch })}
           disabled={gitBusy}
         >
           {saveBusy ? (

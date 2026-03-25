@@ -1,46 +1,37 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { open as openDialog } from '@tauri-apps/api/dialog'
 import { listen } from '@tauri-apps/api/event'
 import { open as openExternal } from '@tauri-apps/api/shell'
 import {
   ArrowLeft,
   Bell,
-  Check,
   Download,
   ExternalLink,
-  Folder,
   FolderOpen,
-  FolderRoot,
   Info,
   Languages,
   Monitor,
   Moon,
   Palette,
-  Plus,
   RefreshCcw,
   Save,
   Star,
   Sun,
 } from 'lucide-react'
 import { FigmaSkillIcon } from '../components/FigmaSkillIcon'
-import { Modal } from '../components/Modal'
 import { useToast } from '../components/ToastProvider'
 import { formatDate } from '../lib/i18n'
 import { useI18n } from '../lib/i18n-context'
 import {
-  addCustomApp,
   checkUpdates,
   downloadUpdate,
   getVersion,
   openDownloadedUpdate,
-  saveGitPath,
-  scanApps,
   updateDownloadProgressEvent,
 } from '../lib/tauri'
 import { loadPreferences, savePreferences } from '../lib/preferences'
 import { applyTheme, resolveAppliedTheme } from '../lib/theme'
-import type { AppLanguage, AppPreferences, AppRecord, DownloadUpdateResult, UpdateCheckResult } from '../types'
+import type { AppLanguage, AppPreferences, DownloadUpdateResult, UpdateCheckResult } from '../types'
 
 const repoUrl = 'https://github.com/justwe-bot/SkillBox'
 const releasesUrl = `${repoUrl}/releases`
@@ -99,14 +90,7 @@ export default function SettingsPage() {
   const [savedPreferences, setSavedPreferences] = useState<AppPreferences>(initialPreferences)
   const [preferences, setPreferences] = useState<AppPreferences>(initialPreferences)
   const [version, setVersion] = useState('1.0.0')
-  const [savedGitPath, setSavedGitPath] = useState('')
-  const [gitPathDraft, setGitPathDraft] = useState('')
-  const [apps, setApps] = useState<AppRecord[]>([])
-  const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [customModalOpen, setCustomModalOpen] = useState(false)
-  const [customAppName, setCustomAppName] = useState('')
-  const [customAppPath, setCustomAppPath] = useState('')
   const [checkingUpdates, setCheckingUpdates] = useState(false)
   const [downloadingUpdate, setDownloadingUpdate] = useState(false)
   const [downloadedUpdate, setDownloadedUpdate] = useState<DownloadUpdateResult | null>(null)
@@ -116,7 +100,6 @@ export default function SettingsPage() {
   const appliedTheme = resolveAppliedTheme(preferences.theme)
   const platformLabel = useMemo(() => getPlatformLabel(t('common.desktop')), [t])
   const hasChanges =
-    savedGitPath !== gitPathDraft ||
     savedPreferences.autoScan !== preferences.autoScan ||
     savedPreferences.autoSync !== preferences.autoSync ||
     savedPreferences.desktopNotifications !== preferences.desktopNotifications ||
@@ -160,25 +143,15 @@ export default function SettingsPage() {
   }, [])
 
   async function loadSettings() {
-    setLoading(true)
-
     try {
-      const [appState, versionState] = await Promise.all([
-        scanApps(),
-        getVersion().catch(() => '1.0.0'),
-      ])
+      const versionState = await getVersion().catch(() => '1.0.0')
       const nextPreferences = loadPreferences()
-      setApps(appState.apps)
-      setSavedGitPath(appState.gitPath)
-      setGitPathDraft(appState.gitPath)
       setSavedPreferences(nextPreferences)
       setPreferences(nextPreferences)
       setLanguage(nextPreferences.language)
       setVersion(versionState)
     } catch (error) {
       notify(t('settings.notifications.loadFailed', { error: String(error) }), 'error')
-    } finally {
-      setLoading(false)
     }
   }
 
@@ -200,52 +173,15 @@ export default function SettingsPage() {
     updatePreferences({ ...preferences, language: nextLanguage })
   }
 
-  async function browseGitPath() {
-    const selected = await openDialog({
-      directory: true,
-      multiple: false,
-      title: t('settings.paths.storageLabel'),
-    })
-
-    if (typeof selected === 'string' && selected) {
-      setGitPathDraft(selected)
-    }
-  }
-
-  async function browseCustomPath() {
-    const selected = await openDialog({
-      directory: true,
-      multiple: false,
-      title: t('settings.dialog.addCustomPath'),
-    })
-
-    if (typeof selected === 'string' && selected) {
-      setCustomAppPath(selected)
-      if (!customAppName.trim()) {
-        const parts = selected.split('/').filter(Boolean)
-        const inferredName = parts[parts.length - 1] ?? t('common.customApp')
-        setCustomAppName(inferredName)
-      }
-    }
-  }
-
   async function handleSaveSettings() {
     if (saving) {
       return
     }
 
-    if (!gitPathDraft.trim()) {
-      notify(t('settings.notifications.chooseStoragePathFirst'), 'error')
-      return
-    }
-
     setSaving(true)
     try {
-      const trimmedGitPath = gitPathDraft.trim()
-      await saveGitPath(trimmedGitPath)
       savePreferences(preferences)
       applyTheme(preferences.theme)
-      setSavedGitPath(trimmedGitPath)
       setSavedPreferences(preferences)
       notify(t('settings.footer.saved'), 'success')
     } catch (error) {
@@ -257,31 +193,9 @@ export default function SettingsPage() {
 
   function handleResetSettings() {
     setPreferences(savedPreferences)
-    setGitPathDraft(savedGitPath)
     applyTheme(savedPreferences.theme)
     setLanguage(savedPreferences.language)
     notify(t('settings.footer.resetSuccess'), 'success')
-  }
-
-  async function handleAddCustomApp() {
-    if (!customAppPath.trim()) {
-      notify(t('settings.notifications.chooseCustomPathFirst'), 'error')
-      return
-    }
-
-    const pathParts = customAppPath.split('/').filter(Boolean)
-    const resolvedName = customAppName.trim() || pathParts[pathParts.length - 1] || t('common.customApp')
-
-    try {
-      await addCustomApp(resolvedName, customAppPath.trim())
-      setCustomModalOpen(false)
-      setCustomAppName('')
-      setCustomAppPath('')
-      await loadSettings()
-      notify(t('settings.notifications.customPathAdded'), 'success')
-    } catch (error) {
-      notify(t('settings.notifications.customPathAddFailed', { error: String(error) }), 'error')
-    }
   }
 
   async function handleCheckUpdates() {
@@ -402,74 +316,6 @@ export default function SettingsPage() {
       </header>
 
       <main className="settings-shell">
-        <section className="surface settings-panel">
-          <div className="settings-panel__header">
-            <div className="settings-panel__title">
-              <FolderRoot size={18} />
-              <div>
-                <h2>{t('settings.paths.title')}</h2>
-                <p className="muted">{t('settings.paths.description')}</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="settings-panel__body">
-            <div className="settings-field">
-              <div className="settings-field__label">{t('settings.paths.storageLabel')}</div>
-              <div className="settings-input-row">
-                <input
-                  className="settings-input"
-                  value={gitPathDraft}
-                  readOnly
-                  placeholder={t('settings.paths.storagePlaceholder')}
-                />
-                <button className="button button--ghost settings-input-row__action" type="button" onClick={browseGitPath}>
-                  {t('common.browse')}
-                </button>
-              </div>
-              <p className="settings-help">{t('settings.paths.storageHelp')}</p>
-            </div>
-
-            <div className="settings-separator" />
-
-            <div className="settings-subsection">
-              <div className="settings-subsection__header">
-                <div>
-                  <h3>{t('settings.paths.scanTitle')}</h3>
-                  <p className="muted">{t('settings.paths.scanDescription')}</p>
-                </div>
-                <button className="button button--ghost settings-subsection__action" type="button" onClick={() => setCustomModalOpen(true)}>
-                  <Plus size={16} />
-                  {t('settings.paths.addCustomPath')}
-                </button>
-              </div>
-
-              <div className="settings-path-list">
-                {apps.map((app) => (
-                  <div className="settings-path-row" key={`${app.id}:${app.path}`}>
-                    <div className="settings-path-row__content">
-                      <strong>{app.name}</strong>
-                      <span className="ellipsis">{app.customPath ?? app.path}</span>
-                    </div>
-                    <span className={`badge badge--compact ${app.isInstalled ? 'badge--success' : 'badge--muted'}`}>
-                      {app.isInstalled ? (
-                        <>
-                          <Check className="badge__icon" size={14} />
-                          {t('settings.paths.detected')}
-                        </>
-                      ) : (
-                        t('settings.paths.notDetected')
-                      )}
-                    </span>
-                  </div>
-                ))}
-
-                {!apps.length && !loading ? <div className="empty-state">{t('settings.paths.empty')}</div> : null}
-              </div>
-            </div>
-          </div>
-        </section>
-
         <section className="surface settings-panel">
           <div className="settings-panel__header">
             <div className="settings-panel__title">
@@ -735,43 +581,6 @@ export default function SettingsPage() {
           </button>
         </div>
       </main>
-
-      <Modal open={customModalOpen} title={t('settings.dialog.addCustomPath')} onClose={() => setCustomModalOpen(false)}>
-        <div className="modal__body">
-          <div className="field-group">
-            <label htmlFor="custom-app-name">{t('common.appName')}</label>
-            <input
-              id="custom-app-name"
-              value={customAppName}
-              onChange={(event) => setCustomAppName(event.target.value)}
-              placeholder={t('settings.dialog.customAppNamePlaceholder')}
-            />
-          </div>
-          <div className="field-group">
-            <label htmlFor="custom-app-path">{t('common.path')}</label>
-            <div className="inline-field">
-              <input
-                id="custom-app-path"
-                value={customAppPath}
-                readOnly
-                placeholder={t('settings.dialog.customAppPathPlaceholder')}
-              />
-              <button className="button button--ghost" type="button" onClick={() => void browseCustomPath()}>
-                <Folder size={16} />
-                {t('common.browse')}
-              </button>
-            </div>
-          </div>
-        </div>
-        <div className="modal__footer">
-          <button className="button button--ghost" type="button" onClick={() => setCustomModalOpen(false)}>
-            {t('common.cancel')}
-          </button>
-          <button className="button button--primary" type="button" onClick={() => void handleAddCustomApp()}>
-            {t('settings.dialog.addPath')}
-          </button>
-        </div>
-      </Modal>
     </div>
   )
 }

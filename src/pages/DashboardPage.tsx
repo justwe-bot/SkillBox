@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { open as openDialog } from '@tauri-apps/api/dialog'
 import { Archive, BookOpen, FolderOpen, FolderPlus, RefreshCw, Scan, Search, Settings } from 'lucide-react'
 import { ApplicationCard } from '../components/ApplicationCard'
@@ -81,7 +81,7 @@ function loadDashboardSnapshot(): DashboardSnapshot | null {
       apps: parsed.apps,
       skills: parsed.skills,
       gitPath: parsed.gitPath ?? '',
-      gitConfig: parsed.gitConfig ?? { repoUrl: '', username: '', branch: 'main' },
+      gitConfig: parsed.gitConfig ?? { repoUrl: '', branch: 'main' },
       search: parsed.search ?? '',
     }
   } catch {
@@ -131,7 +131,6 @@ function mapGitPathSkillsToRecords(files: BackendSkillFile[], language: string):
 }
 
 export default function DashboardPage() {
-  const navigate = useNavigate()
   const { language, t } = useI18n()
   const { notify } = useToast()
   const cachedSnapshotRef = useRef<DashboardSnapshot | null>(loadDashboardSnapshot())
@@ -140,7 +139,7 @@ export default function DashboardPage() {
   const [apps, setApps] = useState<AppRecord[]>(() => cachedSnapshotRef.current?.apps ?? [])
   const [skills, setSkills] = useState<SkillRecord[]>(() => cachedSnapshotRef.current?.skills ?? [])
   const [gitPath, setGitPath] = useState(() => cachedSnapshotRef.current?.gitPath ?? '')
-  const [gitConfig, setGitConfig] = useState<GitSyncConfig>(() => cachedSnapshotRef.current?.gitConfig ?? { repoUrl: '', username: '', branch: 'main' })
+  const [gitConfig, setGitConfig] = useState<GitSyncConfig>(() => cachedSnapshotRef.current?.gitConfig ?? { repoUrl: '', branch: 'main' })
   const [appLoading, setAppLoading] = useState(() => !cachedSnapshotRef.current)
   const [skillLoading, setSkillLoading] = useState(false)
   const [gitSkillLoading, setGitSkillLoading] = useState(false)
@@ -592,7 +591,7 @@ export default function DashboardPage() {
 
     switch (guideStepIndex) {
       case 0:
-        navigate('/settings')
+        focusSection('sync', syncAreaRef)
         break
       case 1:
         focusSection('sync', syncAreaRef)

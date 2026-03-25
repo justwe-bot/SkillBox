@@ -64,7 +64,6 @@ export type ScanAppsResponse = [BackendApp[], string] | ScanAppsResponseObject
 
 export interface GitSyncConfig {
   repoUrl: string
-  username: string
   branch: string
 }
 

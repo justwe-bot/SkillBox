@@ -98,8 +98,6 @@ struct SyncEnabledSkillsConfig {
 struct GitSyncConfig {
     #[serde(default)]
     repo_url: String,
-    #[serde(default)]
-    username: String,
     #[serde(default = "default_git_branch")]
     branch: String,
 }
@@ -169,6 +167,7 @@ struct GitHubRelease {
 
 const SYNC_MANIFEST_FILE: &str = ".skillbox-sync.json";
 const SYNC_ENABLED_SKILLS_FILE: &str = ".skillbox-enabled-skills.json";
+const INTERNAL_GIT_REPO_DIR: &str = ".skillbox-git";
 const GITHUB_REPOSITORY: &str = "justwe-bot/SkillBox";
 const GITHUB_REPOSITORY_URL: &str = "https://github.com/justwe-bot/SkillBox";
 const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "skillbox://update-download-progress";
@@ -724,10 +723,23 @@ fn find_known_app(app_id: &str) -> Option<KnownApp> {
 
 fn should_skip_walk_entry(entry: &DirEntry) -> bool {
     let name = entry.file_name().to_string_lossy();
-    !matches!(
+
+    // Always skip these directories (at any depth)
+    if matches!(
         name.as_ref(),
         ".git" | "node_modules" | "target" | "__pycache__" | ".DS_Store"
-    )
+    ) {
+        return false;
+    }
+
+    // Skip .skillbox-git only at the top level (depth == 1)
+    // This prevents scanning .skillbox-git when walking the outer sync directory,
+    // but allows normal scanning when .skillbox-git is the root being scanned.
+    if name == INTERNAL_GIT_REPO_DIR && entry.depth() == 1 {
+        return false;
+    }
+
+    true
 }
 
 fn is_instruction_markdown(file_name: &str, parent_name: Option<&str>) -> bool {
@@ -1101,7 +1113,6 @@ fn default_git_branch() -> String {
 fn default_git_config() -> GitSyncConfig {
     GitSyncConfig {
         repo_url: String::new(),
-        username: String::new(),
         branch: default_git_branch(),
     }
 }
@@ -1226,6 +1237,10 @@ fn resolve_link_target(link_path: &Path) -> Option<PathBuf> {
 
 fn resolve_managed_link_dir(app_id: &str) -> PathBuf {
     get_config_path().join("linked_apps").join(app_id)
+}
+
+fn resolve_internal_git_repo_dir(sync_dir: &Path) -> PathBuf {
+    sync_dir.join(INTERNAL_GIT_REPO_DIR)
 }
 
 fn sanitize_sync_entry_name(value: &str) -> Result<String, String> {
@@ -1852,6 +1867,106 @@ fn copy_path_recursive(source: &Path, target: &Path) -> Result<(), String> {
     }
 }
 
+fn prune_empty_parent_dirs(root: &Path, path: &Path) -> Result<(), String> {
+    let mut current = path.parent();
+
+    while let Some(dir) = current {
+        if dir == root {
+            break;
+        }
+
+        let is_empty = fs::read_dir(dir)
+            .map_err(|e| e.to_string())?
+            .next()
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .is_none();
+
+        if !is_empty {
+            break;
+        }
+
+        fs::remove_dir(dir).map_err(|e| e.to_string())?;
+        current = dir.parent();
+    }
+
+    Ok(())
+}
+
+fn sync_metadata_file(
+    source_root: &Path,
+    target_root: &Path,
+    file_name: &str,
+    remove_if_missing: bool,
+) -> Result<(), String> {
+    let source = source_root.join(file_name);
+    let target = target_root.join(file_name);
+
+    if source.exists() {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::copy(source, target).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    if remove_if_missing && target.exists() {
+        remove_path_if_exists(&target)?;
+    }
+
+    Ok(())
+}
+
+fn sync_skill_workspace(
+    source_root: &Path,
+    target_root: &Path,
+    remove_missing_entries: bool,
+) -> Result<(), String> {
+    fs::create_dir_all(source_root).map_err(|e| e.to_string())?;
+    fs::create_dir_all(target_root).map_err(|e| e.to_string())?;
+
+    let source_entries = list_sync_dir_entries(source_root)?;
+    let source_entry_set: HashSet<String> = source_entries.iter().cloned().collect();
+
+    if remove_missing_entries {
+        for target_entry in list_sync_dir_entries(target_root)? {
+            if source_entry_set.contains(&target_entry) {
+                continue;
+            }
+
+            let stale_path = target_root.join(&target_entry);
+            remove_path_if_exists(&stale_path)?;
+            prune_empty_parent_dirs(target_root, &stale_path)?;
+        }
+    }
+
+    for entry_name in &source_entries {
+        let source = source_root.join(entry_name);
+        let target = target_root.join(entry_name);
+        remove_path_if_exists(&target)?;
+        copy_path_recursive(&source, &target)?;
+    }
+
+    if remove_missing_entries {
+        save_sync_manifest(target_root, &source_entries)?;
+    }
+
+    sync_metadata_file(
+        source_root,
+        target_root,
+        SYNC_MANIFEST_FILE,
+        remove_missing_entries,
+    )?;
+    sync_metadata_file(
+        source_root,
+        target_root,
+        SYNC_ENABLED_SKILLS_FILE,
+        remove_missing_entries,
+    )?;
+
+    Ok(())
+}
+
 fn save_sync_manifest(repo_path: &Path, entries: &[String]) -> Result<(), String> {
     let manifest_path = repo_path.join(SYNC_MANIFEST_FILE);
     let content = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
@@ -1993,13 +2108,6 @@ fn ensure_repo_initialized(repo_path: &Path, git_config: &GitSyncConfig) -> Resu
 
     if !repo_path.join(".git").exists() {
         return Err("Local sync directory is not a git repository".to_string());
-    }
-
-    if !git_config.username.trim().is_empty() {
-        let _ = run_git(
-            repo_path,
-            &["config", "user.name", git_config.username.trim()],
-        );
     }
 
     if !git_config.repo_url.trim().is_empty() {
@@ -2614,7 +2722,11 @@ fn sync_to_git(repo_path: String) -> Result<(), String> {
     if let Ok(existing_entries) = fs::read_dir(&repo) {
         for entry in existing_entries.filter_map(Result::ok) {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name != ".git" && name != SYNC_MANIFEST_FILE && name != SYNC_ENABLED_SKILLS_FILE {
+            if name != ".git"
+                && name != INTERNAL_GIT_REPO_DIR
+                && name != SYNC_MANIFEST_FILE
+                && name != SYNC_ENABLED_SKILLS_FILE
+            {
                 used_names.insert(name);
             }
         }
@@ -2705,7 +2817,6 @@ fn save_git_config(config: GitSyncConfig) -> Result<(), String> {
     let mut app_config = load_config();
     app_config.git_config = GitSyncConfig {
         repo_url: config.repo_url.trim().to_string(),
-        username: config.username.trim().to_string(),
         branch: if config.branch.trim().is_empty() {
             default_git_branch()
         } else {
@@ -2722,14 +2833,26 @@ fn git_push(repo_path: String) -> Result<(), String> {
         return Err("请先保存仓库地址".to_string());
     }
 
-    let repo = PathBuf::from(&repo_path);
+    let sync_dir = PathBuf::from(&repo_path);
+    fs::create_dir_all(&sync_dir).map_err(|e| e.to_string())?;
+    let repo = resolve_internal_git_repo_dir(&sync_dir);
     ensure_repo_initialized(&repo, &app_config.git_config)?;
-    sync_to_git(repo_path.clone())?;
+    sync_skill_workspace(&sync_dir, &repo, true)?;
     let _ = commit_repo_changes(&repo)?;
-    run_git(
-        &repo,
-        &["push", "-u", "origin", app_config.git_config.branch.trim()],
-    )?;
+    
+    // Check push permission before actual push
+    let branch = app_config.git_config.branch.trim();
+    if let Err(e) = run_git(&repo, &["ls-remote", "--exit-code", "origin", branch]) {
+        return Err(format!(
+            "无法推送到远程仓库，请检查：\n\
+            1. 是否有该仓库的写权限\n\
+            2. 远程分支 '{}' 是否存在\n\
+            3. 网络连接是否正常\n\n错误详情: {}",
+            branch, e
+        ));
+    }
+    
+    run_git(&repo, &["push", "-u", "origin", branch])?;
     Ok(())
 }
 
@@ -2740,8 +2863,11 @@ fn git_pull(repo_path: String) -> Result<String, String> {
         return Err("请先保存仓库地址".to_string());
     }
 
-    let repo = PathBuf::from(&repo_path);
+    let sync_dir = PathBuf::from(&repo_path);
+    fs::create_dir_all(&sync_dir).map_err(|e| e.to_string())?;
+    let repo = resolve_internal_git_repo_dir(&sync_dir);
     ensure_repo_initialized(&repo, &app_config.git_config)?;
+    sync_skill_workspace(&sync_dir, &repo, false)?;
 
     let has_commit = repo_has_any_commit(&repo)?;
 
@@ -2780,6 +2906,7 @@ fn git_pull(repo_path: String) -> Result<String, String> {
             let _ = run_git(&repo, &["branch", "-M", &branch]);
         }
 
+        sync_skill_workspace(&repo, &sync_dir, true)?;
         rebuild_managed_links_for_all_apps(&app_config)?;
         return Ok("已将本地 skills 与远程仓库合并".to_string());
     }
@@ -2815,6 +2942,7 @@ fn git_pull(repo_path: String) -> Result<String, String> {
         return Err(format!("合并远程内容时发生冲突，请手动解决后重试: {}", e));
     }
 
+    sync_skill_workspace(&repo, &sync_dir, true)?;
     rebuild_managed_links_for_all_apps(&app_config)?;
     Ok("已从远程仓库拉取最新内容".to_string())
 }
@@ -2826,8 +2954,11 @@ fn git_sync(repo_path: String) -> Result<String, String> {
         return Err("请先保存仓库地址".to_string());
     }
 
-    let repo = PathBuf::from(&repo_path);
+    let sync_dir = PathBuf::from(&repo_path);
+    fs::create_dir_all(&sync_dir).map_err(|e| e.to_string())?;
+    let repo = resolve_internal_git_repo_dir(&sync_dir);
     ensure_repo_initialized(&repo, &app_config.git_config)?;
+    sync_skill_workspace(&sync_dir, &repo, false)?;
 
     let branch = app_config.git_config.branch.trim().to_string();
     let has_commit = repo_has_any_commit(&repo)?;
@@ -2870,7 +3001,9 @@ fn git_sync(repo_path: String) -> Result<String, String> {
         );
     }
 
+    sync_skill_workspace(&repo, &sync_dir, true)?;
     sync_to_git(repo_path.clone())?;
+    sync_skill_workspace(&sync_dir, &repo, true)?;
     let _ = commit_repo_changes(&repo)?;
     run_git(&repo, &["push", "-u", "origin", &branch])?;
     rebuild_managed_links_for_all_apps(&app_config)?;

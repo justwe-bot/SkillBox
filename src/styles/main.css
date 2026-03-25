@@ -184,7 +184,8 @@ a {
 
 .stats-grid,
 .dashboard-grid,
-.settings-grid {
+.settings-grid,
+.operation-strip {
   padding-left: 28px;
   padding-right: 28px;
 }
@@ -195,6 +196,21 @@ a {
   gap: 12px;
   padding-top: 12px;
   padding-bottom: 12px;
+}
+
+.operation-strip {
+  padding-bottom: 4px;
+}
+
+.operation-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 0 14px;
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 700;
 }
 
 .dashboard-grid {
@@ -579,7 +595,28 @@ a {
 }
 
 .card-app {
+  position: relative;
   padding: 12px 14px 12px;
+}
+
+.card-app--busy {
+  overflow: hidden;
+}
+
+.card-app__overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--panel-raised) 80%, transparent);
+  backdrop-filter: blur(6px);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 700;
 }
 
 .card-app__header,
@@ -801,6 +838,9 @@ a {
 
 .switch-pill__track {
   position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 36px;
   height: 20px;
   border-radius: 999px;
@@ -829,6 +869,14 @@ a {
 
 .switch-pill--on .switch-pill__thumb {
   transform: translateX(16px);
+}
+
+.switch-pill__label--busy {
+  color: var(--text);
+}
+
+.switch-pill__spinner {
+  color: #ffffff;
 }
 
 .skill-item {
@@ -1307,6 +1355,49 @@ a {
   color: var(--text);
 }
 
+.settings-update-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--panel-soft) 84%, var(--panel-raised));
+}
+
+.settings-update-progress__header,
+.settings-update-progress__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.8rem;
+}
+
+.settings-update-progress__header span,
+.settings-update-progress__footer span {
+  color: var(--muted);
+}
+
+.settings-update-progress__track {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--panel-muted) 82%, transparent);
+}
+
+.settings-update-progress__fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #111827 0%, #374151 100%);
+  transition: width 0.2s ease;
+}
+
+:root[data-theme='dark'] .settings-update-progress__fill {
+  background: linear-gradient(90deg, #fafafa 0%, #a1a1aa 100%);
+}
+
 .settings-actions-row {
   display: flex;
   flex-wrap: wrap;
@@ -1524,6 +1615,41 @@ a {
   background: rgba(17, 24, 39, 0.92);
   color: white;
   box-shadow: 0 16px 32px rgba(15, 23, 42, 0.2);
+}
+
+.toast__message {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.toast__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.toast__action {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.toast__action--primary {
+  background: rgba(255, 255, 255, 0.96);
+  color: #111827;
+  border-color: transparent;
+}
+
+.toast__action--danger {
+  background: rgba(217, 45, 32, 0.18);
+  border-color: rgba(255, 255, 255, 0.2);
 }
 
 .toast--success {

@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { Link } from 'react-router-dom'
 import { open as openDialog } from '@tauri-apps/api/dialog'
-import { Archive, FolderOpen, FolderPlus, Scan, Search, Settings } from 'lucide-react'
+import { Archive, FolderOpen, FolderPlus, RefreshCw, Scan, Search, Settings } from 'lucide-react'
 import { ApplicationCard } from '../components/ApplicationCard'
 import { FigmaSkillIcon } from '../components/FigmaSkillIcon'
 import { GitPanel } from '../components/GitPanel'
@@ -18,7 +18,6 @@ import {
   gitPush,
   gitSync,
   linkApp,
-  loadSkillInventory,
   scanGitPathSkills,
   launchApp,
   openPathInFileManager,
@@ -26,14 +25,26 @@ import {
   saveGitConfig as persistGitConfig,
   saveGitPath,
   scanApps,
+  scanSkills,
   setCustomPath,
   syncToGit,
   unlinkApp,
 } from '../lib/tauri'
-import type { AppRecord, GitSyncConfig, SkillRecord } from '../types'
+import type { AppRecord, BackendSkillFile, GitSyncConfig, SkillRecord } from '../types'
 
 type TabKey = 'applications' | 'skills'
 type GitBusyAction = 'saveConfig' | 'push' | 'pull' | 'sync' | 'aggregate' | 'pickPath' | 'changePath' | null
+type SkillScanProgress = {
+  completed: number
+  total: number
+}
+type LinkBusyState = {
+  appId: string
+  action: 'link' | 'unlink'
+  appName: string
+}
+
+const SKILL_SCAN_BATCH_SIZE = 3
 
 function waitForNextPaint() {
   return new Promise<void>((resolve) => {
@@ -41,16 +52,38 @@ function waitForNextPaint() {
   })
 }
 
+function mapGitPathSkillsToRecords(files: BackendSkillFile[]): SkillRecord[] {
+  return files
+    .map((file) => ({
+      id: `git:${file.path}`,
+      name: file.name,
+      description: file.description || file.path,
+      path: file.path,
+      size: file.size,
+      modified: file.modified,
+      sources: ['本地同步目录'],
+      conflicts: false,
+      duplicateCount: 1,
+      canonicalName: file.canonical_name || file.name.toLowerCase(),
+      contentHashes: [file.content_hash],
+      fileCount: file.file_count,
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name))
+}
+
 export default function DashboardPage() {
   const { notify } = useToast()
   const [activeTab, setActiveTab] = useState<TabKey>('applications')
   const [apps, setApps] = useState<AppRecord[]>([])
   const [skills, setSkills] = useState<SkillRecord[]>([])
-  const [gitSkillCount, setGitSkillCount] = useState(0)
   const [gitPath, setGitPath] = useState('')
   const [gitConfig, setGitConfig] = useState<GitSyncConfig>({ repoUrl: '', username: '', branch: 'main' })
-  const [loading, setLoading] = useState(true)
+  const [appLoading, setAppLoading] = useState(true)
+  const [skillLoading, setSkillLoading] = useState(false)
+  const [gitSkillLoading, setGitSkillLoading] = useState(false)
+  const [skillScanProgress, setSkillScanProgress] = useState<SkillScanProgress>({ completed: 0, total: 0 })
   const [busyAppId, setBusyAppId] = useState<string | null>(null)
+  const [linkBusyState, setLinkBusyState] = useState<LinkBusyState | null>(null)
   const [gitBusyAction, setGitBusyAction] = useState<GitBusyAction>(null)
   const [search, setSearch] = useState('')
   const [customModalOpen, setCustomModalOpen] = useState(false)
@@ -69,36 +102,152 @@ export default function DashboardPage() {
   const [pendingGitPath, setPendingGitPath] = useState('')
   const [confirmGitPathOpen, setConfirmGitPathOpen] = useState(false)
   const gitBusy = gitBusyAction !== null
+  const scanSessionRef = useRef(0)
+  const scannedSkillListsRef = useRef<Map<string, { app: AppRecord; files: BackendSkillFile[] }>>(new Map())
+
+  function beginScanSession() {
+    const sessionId = scanSessionRef.current + 1
+    scanSessionRef.current = sessionId
+    return sessionId
+  }
+
+  function isCurrentSession(sessionId: number) {
+    return scanSessionRef.current === sessionId
+  }
+
+  async function scanGitPathInBackground(path: string, sessionId: number) {
+    if (!path) {
+      if (isCurrentSession(sessionId)) {
+        setSkills([])
+        setGitSkillLoading(false)
+      }
+      return
+    }
+
+    setGitSkillLoading(true)
+    const gitSkills = await scanGitPathSkills(path).catch(() => [])
+
+    if (!isCurrentSession(sessionId)) {
+      return
+    }
+
+    setSkills(mapGitPathSkillsToRecords(gitSkills))
+    setGitSkillLoading(false)
+  }
+
+  async function scanSkillsInBackground(nextApps: AppRecord[], sessionId: number, showToast: boolean) {
+    const readableApps = nextApps.filter((app) => app.isInstalled || app.isLinked)
+
+    scannedSkillListsRef.current = new Map()
+    setApps(nextApps.map((app) => ({ ...app, skillCount: 0 })))
+    setSkillScanProgress({ completed: 0, total: readableApps.length })
+
+    if (!readableApps.length) {
+      setSkillLoading(false)
+
+      if (showToast) {
+        notify(`扫描完成，共检测到 ${nextApps.filter((app) => app.isInstalled).length} 个应用`, 'success')
+      }
+      return
+    }
+
+    setSkillLoading(true)
+
+    for (let startIndex = 0; startIndex < readableApps.length; startIndex += SKILL_SCAN_BATCH_SIZE) {
+      if (!isCurrentSession(sessionId)) {
+        return
+      }
+
+      const batch = readableApps.slice(startIndex, startIndex + SKILL_SCAN_BATCH_SIZE)
+      const results = await Promise.all(
+        batch.map(async (app) => ({
+          app,
+          files: await scanSkills(app.id).catch(() => [] as BackendSkillFile[]),
+        })),
+      )
+
+      if (!isCurrentSession(sessionId)) {
+        return
+      }
+
+      for (const result of results) {
+        scannedSkillListsRef.current.set(result.app.id, result)
+      }
+
+      setApps((previousApps) =>
+        previousApps.map((app) => {
+          const result = scannedSkillListsRef.current.get(app.id)
+          return result ? { ...app, skillCount: result.files.length } : app
+        }),
+      )
+      setSkillScanProgress({
+        completed: Math.min(startIndex + batch.length, readableApps.length),
+        total: readableApps.length,
+      })
+
+      if (startIndex + SKILL_SCAN_BATCH_SIZE < readableApps.length) {
+        await waitForNextPaint()
+      }
+    }
+
+    if (!isCurrentSession(sessionId)) {
+      return
+    }
+
+    setSkillLoading(false)
+
+    if (showToast) {
+      notify(`扫描完成，共检测到 ${nextApps.filter((app) => app.isInstalled).length} 个应用`, 'success')
+    }
+  }
 
   async function refreshData(showToast = false) {
-    setLoading(true)
+    const sessionId = beginScanSession()
+    setAppLoading(true)
+    setSkillLoading(false)
+    setSkillScanProgress({ completed: 0, total: 0 })
 
     try {
       const [appState, configState] = await Promise.all([scanApps(), getGitConfig()])
+      if (!isCurrentSession(sessionId)) {
+        return
+      }
+
       setApps(appState.apps)
       setGitPath(appState.gitPath)
       setGitConfig(configState)
-      setSkills(await loadSkillInventory(appState.apps))
+      setGitSkillLoading(Boolean(appState.gitPath))
+      if (!appState.gitPath) {
+        setSkills([])
+      }
+      setAppLoading(false)
 
-      if (appState.gitPath) {
-        const gitSkills = await scanGitPathSkills(appState.gitPath).catch(() => [])
-        setGitSkillCount(gitSkills.length)
-      } else {
-        setGitSkillCount(0)
+      await waitForNextPaint()
+      if (!isCurrentSession(sessionId)) {
+        return
       }
 
-      if (showToast) {
-        notify(`扫描完成，共检测到 ${appState.apps.filter((app) => app.isInstalled).length} 个应用`, 'success')
-      }
+      void scanGitPathInBackground(appState.gitPath, sessionId)
+      void scanSkillsInBackground(appState.apps, sessionId, showToast)
     } catch (error) {
       notify(`加载失败: ${String(error)}`, 'error')
-    } finally {
-      setLoading(false)
+
+      if (isCurrentSession(sessionId)) {
+        setAppLoading(false)
+        setSkillLoading(false)
+        setGitSkillLoading(false)
+        setBusyAppId(null)
+        setLinkBusyState(null)
+      }
     }
   }
 
   useEffect(() => {
     void refreshData()
+
+    return () => {
+      scanSessionRef.current += 1
+    }
   }, [])
 
   const filteredSkills = useMemo(() => {
@@ -136,11 +285,66 @@ export default function DashboardPage() {
   const stats = useMemo(() => {
     return {
       appCount: apps.filter((app) => app.isInstalled).length,
-      skillCount: gitSkillCount,
+      skillCount: skills.length,
       linkedCount: apps.filter((app) => app.isLinked).length,
       conflictCount: skills.filter((skill) => skill.conflicts).length,
     }
-  }, [apps, skills, gitSkillCount])
+  }, [apps, skills])
+
+  const heroText = useMemo(() => {
+    if (appLoading) {
+      return '正在检测已安装的应用...'
+    }
+
+    if (skillLoading) {
+      return `技能后台扫描中，已完成 ${skillScanProgress.completed}/${skillScanProgress.total}`
+    }
+
+    if (gitSkillLoading) {
+      return '正在更新本地同步目录中的技能统计...'
+    }
+
+    return '统一管理所有 AI 应用的技能'
+  }, [appLoading, gitSkillLoading, skillLoading, skillScanProgress.completed, skillScanProgress.total])
+
+  const refreshButtonLabel = appLoading ? '检测应用中...' : skillLoading ? '后台扫描中...' : '扫描应用'
+  const activeOperationLabel = useMemo(() => {
+    if (linkBusyState) {
+      return linkBusyState.action === 'link'
+        ? `正在为 ${linkBusyState.appName} 创建链接...`
+        : `正在取消 ${linkBusyState.appName} 的链接...`
+    }
+
+    if (gitBusyAction === 'aggregate') {
+      return '正在汇总技能到本地同步目录...'
+    }
+
+    if (gitBusyAction === 'push') {
+      return '正在推送到远程仓库...'
+    }
+
+    if (gitBusyAction === 'pull') {
+      return '正在从远程仓库拉取...'
+    }
+
+    if (gitBusyAction === 'sync') {
+      return '正在同步本地与远程技能...'
+    }
+
+    if (gitBusyAction === 'saveConfig') {
+      return '正在保存 Git 配置...'
+    }
+
+    if (gitBusyAction === 'pickPath') {
+      return '正在选择本地同步目录...'
+    }
+
+    if (gitBusyAction === 'changePath') {
+      return '正在切换本地同步目录...'
+    }
+
+    return null
+  }, [gitBusyAction, linkBusyState])
 
   async function handleToggleLink(app: AppRecord) {
     if (!app.isLinked && !gitPath) {
@@ -154,6 +358,11 @@ export default function DashboardPage() {
       prev.map((a) => (a.id === app.id ? { ...a, isLinked: nextLinked } : a)),
     )
     setBusyAppId(app.id)
+    setLinkBusyState({
+      appId: app.id,
+      action: app.isLinked ? 'unlink' : 'link',
+      appName: app.name,
+    })
 
     try {
       if (app.isLinked) {
@@ -170,24 +379,15 @@ export default function DashboardPage() {
       )
       notify(`操作失败: ${String(error)}`, 'error')
       setBusyAppId(null)
+      setLinkBusyState(null)
       return
     }
 
     setBusyAppId(null)
+    setLinkBusyState(null)
 
-    // Refresh app list and skill inventory in the background — UI is already updated
-    scanApps()
-      .then((appState) => {
-        setApps(appState.apps)
-        setGitPath(appState.gitPath)
-        return loadSkillInventory(appState.apps)
-      })
-      .then((updatedSkills) => {
-        setSkills(updatedSkills)
-      })
-      .catch(() => {
-        // Background refresh failed — not critical, user already got the toast
-      })
+    // Refresh in the background using staged batches so the page stays responsive.
+    void refreshData()
   }
 
   async function handleOpenAppFolder(app: AppRecord) {
@@ -477,13 +677,13 @@ export default function DashboardPage() {
           <FigmaSkillIcon size={48} />
           <div>
             <h1>AI Skills Manager</h1>
-            <p className="hero__text">统一管理所有 AI 应用的技能</p>
+            <p className="hero__text">{heroText}</p>
           </div>
         </div>
         <div className="hero__actions">
-          <button className="button button--primary button--hero" type="button" onClick={() => void refreshData(true)} disabled={loading}>
+          <button className="button button--primary button--hero" type="button" onClick={() => void refreshData(true)} disabled={appLoading}>
             <Scan size={18} />
-            {loading ? '扫描中...' : '扫描应用'}
+            {refreshButtonLabel}
           </button>
           <ThemeToggle />
           <Link className="button button--square" to="/settings" aria-label="设置">
@@ -499,7 +699,7 @@ export default function DashboardPage() {
         </article>
         <article className="surface stat-card">
           <span className="stat-card__label">技能文件总数</span>
-          <strong>{stats.skillCount}</strong>
+          <strong>{gitSkillLoading ? '扫描中...' : stats.skillCount}</strong>
         </article>
         <article className="surface stat-card">
           <span className="stat-card__label">已链接应用</span>
@@ -510,6 +710,15 @@ export default function DashboardPage() {
           <strong className={stats.conflictCount ? 'danger' : ''}>{stats.conflictCount}</strong>
         </article>
       </section>
+
+      {activeOperationLabel ? (
+        <section className="operation-strip">
+          <div className="surface operation-banner" aria-live="polite" aria-busy="true">
+            <RefreshCw size={16} className="spin" />
+            <span>{activeOperationLabel}</span>
+          </div>
+        </section>
+      ) : null}
 
       <main className="dashboard-grid">
         <section className="main-column">
@@ -533,7 +742,7 @@ export default function DashboardPage() {
 
               {sortedApps.length === 0 ? (
                 <div className="surface empty-state">
-                  <p>当前没有发现任何应用，点击上方“重新扫描”后再试。</p>
+                  <p>{appLoading ? '正在检测应用，请稍候...' : '当前没有发现任何应用，点击上方“重新扫描”后再试。'}</p>
                 </div>
               ) : (
                 sortedApps.map((app) => (
@@ -542,6 +751,13 @@ export default function DashboardPage() {
                     app={app}
                     totalSkillCount={skills.length}
                     busy={busyAppId === app.id}
+                    busyLabel={
+                      linkBusyState?.appId === app.id
+                        ? linkBusyState.action === 'link'
+                          ? '链接中...'
+                          : '取消中...'
+                        : null
+                    }
                     onToggleLink={handleToggleLink}
                     onOpenFolder={handleOpenAppFolder}
                     onLaunchApp={handleLaunchApp}
@@ -579,7 +795,7 @@ export default function DashboardPage() {
 
               {filteredSkills.length === 0 ? (
                 <div className="surface empty-state">
-                  <p>{search ? '没有匹配的技能结果。' : '当前没有可显示的技能文件。'}</p>
+                  <p>{search ? '没有匹配的技能结果。' : skillLoading ? '技能正在后台分批扫描，结果会陆续显示。' : '当前没有可显示的技能文件。'}</p>
                 </div>
               ) : (
                 filteredSkills.map((skill) => (
@@ -631,6 +847,7 @@ export default function DashboardPage() {
                   onClick={() => void handlePickGitFolder()}
                   disabled={gitBusy}
                 >
+                  {gitBusyAction === 'pickPath' || gitBusyAction === 'changePath' ? <RefreshCw size={16} className="spin" /> : null}
                   {gitBusyAction === 'pickPath' || gitBusyAction === 'changePath' ? '选择中...' : '更改路径'}
                 </button>
                 <button
@@ -639,7 +856,7 @@ export default function DashboardPage() {
                   onClick={() => void handleAggregateSkills()}
                   disabled={gitBusy}
                 >
-                  <Archive size={17} />
+                  {gitBusyAction === 'aggregate' ? <RefreshCw size={17} className="spin" /> : <Archive size={17} />}
                   {gitBusyAction === 'aggregate' ? '汇总中...' : '汇总技能'}
                 </button>
               </div>
@@ -652,6 +869,7 @@ export default function DashboardPage() {
               onClick={() => void handlePickGitFolder()}
               disabled={gitBusy}
             >
+              {gitBusyAction === 'pickPath' ? <RefreshCw size={16} className="spin" /> : null}
               {gitBusyAction === 'pickPath' ? '选择中...' : '选择本地同步目录'}
             </button>
           ) : null}

@@ -1,4 +1,4 @@
-import { Check, FolderOpen, PencilLine, Play } from 'lucide-react'
+import { Check, FolderOpen, PencilLine, Play, RefreshCw } from 'lucide-react'
 import type { AppRecord } from '../types'
 import { AnimatedNumber } from './AnimatedNumber'
 import { AppBrandIcon } from './AppBrandIcon'
@@ -7,6 +7,7 @@ interface ApplicationCardProps {
   app: AppRecord
   totalSkillCount: number
   busy: boolean
+  busyLabel?: string | null
   onToggleLink: (app: AppRecord) => void
   onOpenFolder: (app: AppRecord) => void
   onLaunchApp: (app: AppRecord) => void
@@ -17,6 +18,7 @@ export function ApplicationCard({
   app,
   totalSkillCount,
   busy,
+  busyLabel,
   onToggleLink,
   onOpenFolder,
   onLaunchApp,
@@ -25,7 +27,13 @@ export function ApplicationCard({
   const displaySkillCount = app.isLinked ? totalSkillCount : app.skillCount
 
   return (
-    <article className="surface card-app">
+    <article className={`surface card-app ${busy ? 'card-app--busy' : ''}`}>
+      {busy ? (
+        <div className="card-app__overlay" aria-live="polite" aria-busy="true">
+          <RefreshCw size={18} className="spin" />
+          <span>{busyLabel ?? '正在处理...'}</span>
+        </div>
+      ) : null}
       <div className="card-app__header">
         <div className="card-app__identity">
           <div className="card-app__icon-wrap">
@@ -42,6 +50,7 @@ export function ApplicationCard({
               className="button button--icon-ghost card-app__action"
               type="button"
               onClick={() => onOpenFolder(app)}
+              disabled={busy}
               aria-label={`打开 ${app.name} 文件夹`}
               title="打开文件夹"
             >
@@ -51,7 +60,7 @@ export function ApplicationCard({
               className="button button--icon-ghost card-app__action"
               type="button"
               onClick={() => onLaunchApp(app)}
-              disabled={!app.isInstalled}
+              disabled={busy || !app.isInstalled}
               aria-label={`运行 ${app.name}`}
               title="运行软件"
             >
@@ -61,6 +70,7 @@ export function ApplicationCard({
               className="button button--icon-ghost card-app__action"
               type="button"
               onClick={() => onEditPath(app)}
+              disabled={busy}
               aria-label={`修改 ${app.name} 路径`}
               title="修改文件夹"
             >
@@ -97,17 +107,17 @@ export function ApplicationCard({
           disabled={busy || !app.isInstalled}
           aria-pressed={app.isLinked}
         >
-          <span className={`switch-pill__label ${app.isLinked ? 'switch-pill__label--linked' : ''}`}>
-            {app.isLinked ? '已链接' : '未链接'}
+          <span className={`switch-pill__label ${app.isLinked ? 'switch-pill__label--linked' : ''} ${busy ? 'switch-pill__label--busy' : ''}`}>
+            {busy ? busyLabel ?? '处理中...' : app.isLinked ? '已链接' : '未链接'}
           </span>
           <span className="switch-pill__track">
-            <span className="switch-pill__thumb" />
+            {busy ? <RefreshCw size={12} className="switch-pill__spinner spin" /> : <span className="switch-pill__thumb" />}
           </span>
         </button>
       </div>
 
       {app.isCustom ? (
-        <button className="button button--card button--full" type="button" onClick={() => onEditPath(app)}>
+        <button className="button button--card button--full" type="button" onClick={() => onEditPath(app)} disabled={busy}>
           <FolderOpen size={18} />
           选择路径加载技能
         </button>

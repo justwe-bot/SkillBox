@@ -5,6 +5,7 @@
 
 mod figma;
 
+use futures_util::StreamExt;
 use figma::{
     extract_css_from_node, extract_design_tokens, find_nodes_by_name, find_nodes_by_type,
     DesignToken, FigmaClient, FigmaComment, FigmaFile, FigmaFileData,
@@ -15,6 +16,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tokio::fs as tokio_fs;
+use tokio::io::AsyncWriteExt;
 use walkdir::{DirEntry, WalkDir};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +93,31 @@ struct UpdateCheckResult {
     notes: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadUpdateResult {
+    version: String,
+    file_name: String,
+    file_path: String,
+    release_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateDownloadProgressPayload {
+    file_name: String,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    percentage: f64,
+    status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct GitHubRelease {
     tag_name: String,
@@ -97,11 +125,14 @@ struct GitHubRelease {
     name: Option<String>,
     body: Option<String>,
     published_at: Option<String>,
+    #[serde(default)]
+    assets: Vec<GitHubReleaseAsset>,
 }
 
 const SYNC_MANIFEST_FILE: &str = ".skillbox-sync.json";
 const GITHUB_REPOSITORY: &str = "justwe-bot/SkillBox";
 const GITHUB_REPOSITORY_URL: &str = "https://github.com/justwe-bot/SkillBox";
+const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "skillbox://update-download-progress";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScanPlatform {
@@ -2015,37 +2046,33 @@ fn is_version_newer(current: &str, latest: &str) -> bool {
     latest_parts > current_parts
 }
 
-#[tauri::command]
-async fn check_updates() -> Result<UpdateCheckResult, String> {
-    let current_version = env!("CARGO_PKG_VERSION").to_string();
-    let release_url = format!("{}/releases", GITHUB_REPOSITORY_URL);
-    let api_url = format!(
+fn release_api_url() -> String {
+    format!(
         "https://api.github.com/repos/{}/releases/latest",
         GITHUB_REPOSITORY
-    );
+    )
+}
 
-    let client = reqwest::Client::builder()
+fn create_update_client(current_version: &str) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
         .user_agent(format!("SkillBox/{}", current_version))
         .build()
-        .map_err(|error| format!("Failed to create update client: {}", error))?;
+        .map_err(|error| format!("Failed to create update client: {}", error))
+}
 
+async fn fetch_latest_release(
+    client: &reqwest::Client,
+    current_version: &str,
+) -> Result<GitHubRelease, String> {
     let response = client
-        .get(api_url)
+        .get(release_api_url())
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await
         .map_err(|error| format!("Failed to request latest release: {}", error))?;
 
     if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(UpdateCheckResult {
-            current_version,
-            latest_version: None,
-            update_available: false,
-            release_url,
-            release_name: None,
-            published_at: None,
-            notes: Some("GitHub Releases 里还没有正式版本。".to_string()),
-        });
+        return Err("GitHub Releases 里还没有正式版本。".to_string());
     }
 
     if !response.status().is_success() {
@@ -2055,10 +2082,160 @@ async fn check_updates() -> Result<UpdateCheckResult, String> {
         ));
     }
 
-    let release = response
+    response
         .json::<GitHubRelease>()
         .await
-        .map_err(|error| format!("Failed to parse GitHub release response: {}", error))?;
+        .map_err(|error| {
+            format!(
+                "Failed to parse GitHub release response for {}: {}",
+                current_version, error
+            )
+        })
+}
+
+fn score_release_asset(asset_name: &str) -> Option<i32> {
+    let lower = asset_name.to_ascii_lowercase();
+
+    #[cfg(target_os = "macos")]
+    {
+        if !(lower.ends_with(".dmg") || lower.ends_with(".tar.gz")) {
+            return None;
+        }
+
+        let mut score = if lower.ends_with(".dmg") { 100 } else { 80 };
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            if lower.contains("aarch64") || lower.contains("arm64") {
+                score += 30;
+            } else if lower.contains("x64") || lower.contains("x86_64") || lower.contains("intel") {
+                score -= 10;
+            }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            if lower.contains("x64") || lower.contains("x86_64") || lower.contains("intel") {
+                score += 30;
+            } else if lower.contains("aarch64") || lower.contains("arm64") {
+                score -= 10;
+            }
+        }
+
+        return Some(score);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if !(lower.ends_with("-setup.exe") || lower.ends_with(".msi") || lower.ends_with(".exe")) {
+            return None;
+        }
+
+        let mut score = if lower.ends_with("-setup.exe") {
+            100
+        } else if lower.ends_with(".msi") {
+            90
+        } else {
+            80
+        };
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            if lower.contains("x64") || lower.contains("x86_64") {
+                score += 20;
+            }
+        }
+
+        return Some(score);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if !(lower.ends_with(".appimage")
+            || lower.ends_with(".deb")
+            || lower.ends_with(".rpm")
+            || lower.ends_with(".tar.gz"))
+        {
+            return None;
+        }
+
+        let score = if lower.ends_with(".appimage") {
+            100
+        } else if lower.ends_with(".deb") {
+            90
+        } else if lower.ends_with(".rpm") {
+            80
+        } else {
+            70
+        };
+
+        return Some(score);
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+fn select_release_asset(release: &GitHubRelease) -> Option<GitHubReleaseAsset> {
+    release
+        .assets
+        .iter()
+        .filter_map(|asset| score_release_asset(&asset.name).map(|score| (score, asset.clone())))
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, asset)| asset)
+}
+
+fn update_download_dir() -> PathBuf {
+    dirs::download_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join("Downloads")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("SkillBox Updates")
+}
+
+fn emit_update_download_progress(
+    window: &tauri::Window,
+    file_name: &str,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    status: &str,
+) {
+    let percentage = total_bytes
+        .filter(|total| *total > 0)
+        .map(|total| ((downloaded_bytes as f64 / total as f64) * 100.0).clamp(0.0, 100.0))
+        .unwrap_or(0.0);
+
+    let _ = window.emit(
+        UPDATE_DOWNLOAD_PROGRESS_EVENT,
+        UpdateDownloadProgressPayload {
+            file_name: file_name.to_string(),
+            downloaded_bytes,
+            total_bytes,
+            percentage,
+            status: status.to_string(),
+        },
+    );
+}
+
+#[tauri::command]
+async fn check_updates() -> Result<UpdateCheckResult, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let release_url = format!("{}/releases", GITHUB_REPOSITORY_URL);
+    let client = create_update_client(&current_version)?;
+    let release = match fetch_latest_release(&client, &current_version).await {
+        Ok(release) => release,
+        Err(error) if error == "GitHub Releases 里还没有正式版本。" => {
+        return Ok(UpdateCheckResult {
+            current_version,
+            latest_version: None,
+            update_available: false,
+            release_url,
+            release_name: None,
+            published_at: None,
+                notes: Some(error),
+        });
+        }
+        Err(error) => return Err(error),
+    };
     let latest_version = release.tag_name.trim().trim_start_matches('v').to_string();
 
     Ok(UpdateCheckResult {
@@ -2070,6 +2247,118 @@ async fn check_updates() -> Result<UpdateCheckResult, String> {
         published_at: release.published_at,
         notes: release.body.map(|value| value.trim().to_string()),
     })
+}
+
+#[tauri::command]
+async fn download_update(window: tauri::Window) -> Result<DownloadUpdateResult, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let client = create_update_client(&current_version)?;
+    let release = fetch_latest_release(&client, &current_version).await?;
+    let latest_version = release.tag_name.trim().trim_start_matches('v').to_string();
+
+    if !is_version_newer(&current_version, &latest_version) {
+        return Err("当前已经是最新版本，无需下载更新。".to_string());
+    }
+
+    let asset = select_release_asset(&release).ok_or_else(|| {
+        "当前平台暂时没有可下载的安装包，请前往 Releases 页面手动下载。".to_string()
+    })?;
+
+    let download_dir = update_download_dir();
+    tokio_fs::create_dir_all(&download_dir)
+        .await
+        .map_err(|error| format!("Failed to create update download directory: {}", error))?;
+
+    let target_path = download_dir.join(&asset.name);
+    emit_update_download_progress(&window, &asset.name, 0, None, "preparing");
+    if target_path.exists() {
+        let existing_size = fs::metadata(&target_path).map(|metadata| metadata.len()).unwrap_or(0);
+        emit_update_download_progress(
+            &window,
+            &asset.name,
+            existing_size,
+            Some(existing_size),
+            "completed",
+        );
+        return Ok(DownloadUpdateResult {
+            version: latest_version,
+            file_name: asset.name,
+            file_path: target_path.to_string_lossy().to_string(),
+            release_url: release.html_url,
+        });
+    }
+
+    let response = client
+        .get(&asset.browser_download_url)
+        .header(reqwest::header::ACCEPT, "application/octet-stream")
+        .send()
+        .await
+        .map_err(|error| format!("Failed to download update asset: {}", error))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Update asset download failed with status {}",
+            response.status()
+        ));
+    }
+
+    let total_bytes = response.content_length();
+    let temp_path = download_dir.join(format!("{}.part", &asset.name));
+    let mut file = tokio_fs::File::create(&temp_path)
+        .await
+        .map_err(|error| format!("Failed to create temporary update file: {}", error))?;
+    let mut downloaded_bytes = 0u64;
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.map_err(|error| format!("Failed to read update asset stream: {}", error))?;
+        file.write_all(&chunk)
+            .await
+            .map_err(|error| format!("Failed to write update asset: {}", error))?;
+        downloaded_bytes += chunk.len() as u64;
+        emit_update_download_progress(
+            &window,
+            &asset.name,
+            downloaded_bytes,
+            total_bytes,
+            "downloading",
+        );
+    }
+
+    file.flush()
+        .await
+        .map_err(|error| format!("Failed to flush update asset to disk: {}", error))?;
+    drop(file);
+
+    tokio_fs::rename(&temp_path, &target_path)
+        .await
+        .map_err(|error| format!("Failed to finalize update asset: {}", error))?;
+
+    let final_size = fs::metadata(&target_path).map(|metadata| metadata.len()).unwrap_or(downloaded_bytes);
+    emit_update_download_progress(
+        &window,
+        &asset.name,
+        final_size,
+        total_bytes.or(Some(final_size)),
+        "completed",
+    );
+
+    Ok(DownloadUpdateResult {
+        version: latest_version,
+        file_name: asset.name,
+        file_path: target_path.to_string_lossy().to_string(),
+        release_url: release.html_url,
+    })
+}
+
+#[tauri::command]
+fn open_downloaded_update(path: String) -> Result<(), String> {
+    let target = PathBuf::from(&path);
+    if !target.exists() {
+        return Err(format!("Update installer does not exist: {}", path));
+    }
+
+    open_system_target(&target)
 }
 
 #[tauri::command]
@@ -2189,6 +2478,8 @@ fn main() {
             launch_app,
             add_custom_app,
             check_updates,
+            download_update,
+            open_downloaded_update,
             get_version,
             figma_get_file,
             figma_get_file_info,

@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { open as openDialog } from '@tauri-apps/api/dialog'
+import { listen } from '@tauri-apps/api/event'
 import { open as openExternal } from '@tauri-apps/api/shell'
 import {
   ArrowLeft,
   Bell,
   Check,
+  Download,
   ExternalLink,
   Folder,
+  FolderOpen,
   FolderRoot,
   Info,
   Monitor,
@@ -21,13 +24,31 @@ import {
 import { FigmaSkillIcon } from '../components/FigmaSkillIcon'
 import { Modal } from '../components/Modal'
 import { useToast } from '../components/ToastProvider'
-import { addCustomApp, checkUpdates, getVersion, saveGitPath, scanApps } from '../lib/tauri'
+import {
+  addCustomApp,
+  checkUpdates,
+  downloadUpdate,
+  getVersion,
+  openDownloadedUpdate,
+  saveGitPath,
+  scanApps,
+  updateDownloadProgressEvent,
+} from '../lib/tauri'
 import { loadPreferences, savePreferences } from '../lib/preferences'
 import { applyTheme, resolveAppliedTheme } from '../lib/theme'
-import type { AppPreferences, AppRecord, UpdateCheckResult } from '../types'
+import type { AppPreferences, AppRecord, DownloadUpdateResult, UpdateCheckResult } from '../types'
 
 const repoUrl = 'https://github.com/justwe-bot/SkillBox'
 const releasesUrl = `${repoUrl}/releases`
+const backgroundUpdateDismissKey = 'skillbox.dismissedUpdateVersion'
+
+interface UpdateDownloadProgress {
+  fileName: string
+  downloadedBytes: number
+  totalBytes: number | null
+  percentage: number
+  status: string
+}
 
 function getPlatformLabel() {
   const platform = `${navigator.platform ?? ''} ${navigator.userAgent ?? ''}`
@@ -66,6 +87,26 @@ function formatPublishedDate(value: string | null) {
   }).format(date)
 }
 
+function formatFileSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return '0 B'
+  }
+
+  if (bytes < 1024) {
+    return `${bytes} B`
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`
+  }
+
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  }
+
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
+}
+
 export default function SettingsPage() {
   const { notify } = useToast()
   const initialPreferences = loadPreferences()
@@ -81,6 +122,9 @@ export default function SettingsPage() {
   const [customAppName, setCustomAppName] = useState('')
   const [customAppPath, setCustomAppPath] = useState('')
   const [checkingUpdates, setCheckingUpdates] = useState(false)
+  const [downloadingUpdate, setDownloadingUpdate] = useState(false)
+  const [downloadedUpdate, setDownloadedUpdate] = useState<DownloadUpdateResult | null>(null)
+  const [downloadProgress, setDownloadProgress] = useState<UpdateDownloadProgress | null>(null)
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null)
 
   const appliedTheme = resolveAppliedTheme(preferences.theme)
@@ -91,12 +135,39 @@ export default function SettingsPage() {
     savedPreferences.autoSync !== preferences.autoSync ||
     savedPreferences.desktopNotifications !== preferences.desktopNotifications ||
     savedPreferences.theme !== preferences.theme
+  const hasDownloadedLatestUpdate =
+    Boolean(downloadedUpdate) &&
+    Boolean(updateResult?.latestVersion) &&
+    downloadedUpdate?.version === updateResult?.latestVersion
 
   useEffect(() => {
     void loadSettings()
 
     return () => {
       applyTheme(loadPreferences().theme)
+    }
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    let cleanup: (() => void) | undefined
+
+    void listen<UpdateDownloadProgress>(updateDownloadProgressEvent, (event) => {
+      if (active) {
+        setDownloadProgress(event.payload)
+      }
+    }).then((unlisten) => {
+      if (!active) {
+        unlisten()
+        return
+      }
+
+      cleanup = unlisten
+    })
+
+    return () => {
+      active = false
+      cleanup?.()
     }
   }, [])
 
@@ -228,6 +299,16 @@ export default function SettingsPage() {
     try {
       const result = await checkUpdates()
       setUpdateResult(result)
+      setDownloadedUpdate((current) => {
+        if (!current || !result.latestVersion) {
+          return null
+        }
+
+        return current.version === result.latestVersion ? current : null
+      })
+      if (result.latestVersion && window.localStorage.getItem(backgroundUpdateDismissKey) !== result.latestVersion) {
+        window.localStorage.removeItem(backgroundUpdateDismissKey)
+      }
 
       if (result.updateAvailable && result.latestVersion) {
         notify(`发现新版本 ${result.latestVersion}`, 'success')
@@ -238,6 +319,49 @@ export default function SettingsPage() {
       notify(`检查更新失败: ${String(error)}`, 'error')
     } finally {
       setCheckingUpdates(false)
+    }
+  }
+
+  async function handleDownloadUpdate() {
+    if (downloadingUpdate) {
+      return
+    }
+
+    setDownloadingUpdate(true)
+    setDownloadProgress({
+      fileName: downloadedUpdate?.fileName ?? updateResult?.releaseName ?? 'SkillBox',
+      downloadedBytes: 0,
+      totalBytes: null,
+      percentage: 0,
+      status: 'preparing',
+    })
+
+    try {
+      const result = await downloadUpdate()
+      setDownloadedUpdate(result)
+      notify(`更新安装包已下载：${result.fileName}`, 'success')
+
+      try {
+        await openDownloadedUpdate(result.filePath)
+      } catch (error) {
+        notify(`安装包已下载，但自动打开失败: ${String(error)}`, 'error')
+      }
+    } catch (error) {
+      notify(`下载更新失败: ${String(error)}`, 'error')
+    } finally {
+      setDownloadingUpdate(false)
+    }
+  }
+
+  async function handleOpenDownloadedInstaller() {
+    if (!downloadedUpdate) {
+      return
+    }
+
+    try {
+      await openDownloadedUpdate(downloadedUpdate.filePath)
+    } catch (error) {
+      notify(`打开安装包失败: ${String(error)}`, 'error')
     }
   }
 
@@ -482,6 +606,10 @@ export default function SettingsPage() {
               <strong>{platformLabel}</strong>
             </div>
             <div className="settings-info-row">
+              <span>已下载更新</span>
+              <strong>{downloadedUpdate?.fileName ?? '未下载'}</strong>
+            </div>
+            <div className="settings-info-row">
               <span>许可证</span>
               <strong>MIT</strong>
             </div>
@@ -491,11 +619,44 @@ export default function SettingsPage() {
                 <p>{updateResult.notes}</p>
               </div>
             ) : null}
+            {downloadProgress && downloadingUpdate ? (
+              <div className="settings-update-progress" aria-live="polite" aria-busy="true">
+                <div className="settings-update-progress__header">
+                  <span>{downloadProgress.status === 'preparing' ? '准备下载更新...' : `正在下载 ${downloadProgress.fileName}`}</span>
+                  <strong>
+                    {downloadProgress.totalBytes
+                      ? `${formatFileSize(downloadProgress.downloadedBytes)} / ${formatFileSize(downloadProgress.totalBytes)}`
+                      : formatFileSize(downloadProgress.downloadedBytes)}
+                  </strong>
+                </div>
+                <div className="settings-update-progress__track">
+                  <div
+                    className="settings-update-progress__fill"
+                    style={{ width: `${Math.max(downloadProgress.percentage, 4)}%` }}
+                  />
+                </div>
+                <div className="settings-update-progress__footer">
+                  <span>{downloadProgress.totalBytes ? `${downloadProgress.percentage.toFixed(0)}%` : '正在获取大小...'}</span>
+                </div>
+              </div>
+            ) : null}
             <div className="settings-actions-row">
-              <button className="button button--ghost settings-repo-button" type="button" onClick={() => void handleCheckUpdates()}>
+              <button className="button button--ghost settings-repo-button" type="button" onClick={() => void handleCheckUpdates()} disabled={checkingUpdates || downloadingUpdate}>
                 <RefreshCcw size={16} />
                 {checkingUpdates ? '检查中...' : '检查更新'}
               </button>
+              {updateResult?.updateAvailable ? (
+                <button className="button button--primary settings-repo-button" type="button" onClick={() => void handleDownloadUpdate()} disabled={checkingUpdates || downloadingUpdate}>
+                  <Download size={16} />
+                  {downloadingUpdate ? '下载中...' : hasDownloadedLatestUpdate ? '重新下载更新' : '下载更新'}
+                </button>
+              ) : null}
+              {downloadedUpdate ? (
+                <button className="button button--ghost settings-repo-button" type="button" onClick={() => void handleOpenDownloadedInstaller()} disabled={downloadingUpdate}>
+                  <FolderOpen size={16} />
+                  打开安装包
+                </button>
+              ) : null}
               <button className="button button--ghost settings-repo-button" type="button" onClick={() => void handleOpenReleasePage()}>
                 <ExternalLink size={16} />
                 打开 Releases

@@ -3,11 +3,19 @@ import type {
   AppRecord,
   BackendApp,
   BackendSkillFile,
+  DownloadUpdateResult,
   GitSyncConfig,
   ScanAppsResponse,
   SkillRecord,
   UpdateCheckResult,
 } from '../types'
+
+interface SkillInventoryChunk {
+  app: AppRecord
+  files: BackendSkillFile[]
+}
+
+export const updateDownloadProgressEvent = 'skillbox://update-download-progress'
 
 function mapApp(app: BackendApp): AppRecord {
   return {
@@ -116,15 +124,15 @@ export function checkUpdates() {
   return invoke<UpdateCheckResult>('check_updates')
 }
 
-export async function loadSkillInventory(apps: AppRecord[]): Promise<SkillRecord[]> {
-  const readableApps = apps.filter((app) => app.isInstalled || app.isLinked)
-  const skillLists = await Promise.all(
-    readableApps.map(async (app) => ({
-      app,
-      files: await scanSkills(app.id).catch(() => [] as BackendSkillFile[]),
-    })),
-  )
+export function downloadUpdate() {
+  return invoke<DownloadUpdateResult>('download_update')
+}
 
+export function openDownloadedUpdate(path: string) {
+  return invoke<void>('open_downloaded_update', { path })
+}
+
+export function buildSkillInventory(skillLists: SkillInventoryChunk[]): SkillRecord[] {
   const grouped = new Map<string, SkillRecord>()
 
   for (const { app, files } of skillLists) {
@@ -180,4 +188,15 @@ export async function loadSkillInventory(apps: AppRecord[]): Promise<SkillRecord
 
     return left.name.localeCompare(right.name)
   })
+}
+
+export async function loadSkillInventory(apps: AppRecord[]): Promise<SkillRecord[]> {
+  const readableApps = apps.filter((app) => app.isInstalled || app.isLinked)
+  const skillLists = await Promise.all(
+    readableApps.map(async (app) => ({
+      app,
+      files: await scanSkills(app.id).catch(() => [] as BackendSkillFile[]),
+    })),
+  )
+  return buildSkillInventory(skillLists)
 }

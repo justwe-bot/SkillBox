@@ -80,3 +80,10 @@ export interface UpdateCheckResult {
   publishedAt: string | null
   notes: string | null
 }
+
+export interface DownloadUpdateResult {
+  version: string
+  fileName: string
+  filePath: string
+  releaseUrl: string
+}

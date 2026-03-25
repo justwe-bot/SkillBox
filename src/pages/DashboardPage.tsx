@@ -9,10 +9,13 @@ import { GitPanel } from '../components/GitPanel'
 import { Modal } from '../components/Modal'
 import { SkillItem } from '../components/SkillItem'
 import { ThemeToggle } from '../components/ThemeToggle'
+import { LOCAL_SYNC_SOURCE, localizeBackendSuccessMessage, localizeSkillSource } from '../lib/i18n'
+import { useI18n } from '../lib/i18n-context'
 import { useToast } from '../components/ToastProvider'
 import {
   addCustomApp,
   deleteSkill,
+  getAppEnabledSkills,
   getGitConfig,
   gitPull,
   gitPush,
@@ -23,6 +26,7 @@ import {
   openPathInFileManager,
   renameSkill,
   saveGitConfig as persistGitConfig,
+  saveAppEnabledSkills,
   saveGitPath,
   scanApps,
   scanSkills,
@@ -30,7 +34,7 @@ import {
   syncToGit,
   unlinkApp,
 } from '../lib/tauri'
-import type { AppRecord, BackendSkillFile, GitSyncConfig, SkillRecord } from '../types'
+import type { AppRecord, BackendSkillFile, GitSyncConfig, ManagedSkillEntry, SkillRecord } from '../types'
 
 type TabKey = 'applications' | 'skills'
 type GitBusyAction = 'saveConfig' | 'push' | 'pull' | 'sync' | 'aggregate' | 'pickPath' | 'changePath' | null
@@ -52,7 +56,7 @@ function waitForNextPaint() {
   })
 }
 
-function mapGitPathSkillsToRecords(files: BackendSkillFile[]): SkillRecord[] {
+function mapGitPathSkillsToRecords(files: BackendSkillFile[], language: string): SkillRecord[] {
   return files
     .map((file) => ({
       id: `git:${file.path}`,
@@ -61,17 +65,18 @@ function mapGitPathSkillsToRecords(files: BackendSkillFile[]): SkillRecord[] {
       path: file.path,
       size: file.size,
       modified: file.modified,
-      sources: ['本地同步目录'],
+      sources: [LOCAL_SYNC_SOURCE],
       conflicts: false,
       duplicateCount: 1,
       canonicalName: file.canonical_name || file.name.toLowerCase(),
       contentHashes: [file.content_hash],
       fileCount: file.file_count,
     }))
-    .sort((left, right) => left.name.localeCompare(right.name))
+    .sort((left, right) => left.name.localeCompare(right.name, language))
 }
 
 export default function DashboardPage() {
+  const { language, t } = useI18n()
   const { notify } = useToast()
   const [activeTab, setActiveTab] = useState<TabKey>('applications')
   const [apps, setApps] = useState<AppRecord[]>([])
@@ -99,6 +104,13 @@ export default function DashboardPage() {
   const [deleteModalOpen, setDeleteModalOpen] = useState(false)
   const [renameValue, setRenameValue] = useState('')
   const [skillBusy, setSkillBusy] = useState(false)
+  const [manageSkillsOpen, setManageSkillsOpen] = useState(false)
+  const [manageSkillsApp, setManageSkillsApp] = useState<AppRecord | null>(null)
+  const [manageSkillsLinkMode, setManageSkillsLinkMode] = useState<'legacy' | 'managed' | null>(null)
+  const [manageSkillsEntries, setManageSkillsEntries] = useState<ManagedSkillEntry[]>([])
+  const [manageSkillsSearch, setManageSkillsSearch] = useState('')
+  const [manageSkillsLoading, setManageSkillsLoading] = useState(false)
+  const [manageSkillsSaving, setManageSkillsSaving] = useState(false)
   const [pendingGitPath, setPendingGitPath] = useState('')
   const [confirmGitPathOpen, setConfirmGitPathOpen] = useState(false)
   const gitBusy = gitBusyAction !== null
@@ -131,7 +143,7 @@ export default function DashboardPage() {
       return
     }
 
-    setSkills(mapGitPathSkillsToRecords(gitSkills))
+    setSkills(mapGitPathSkillsToRecords(gitSkills, language))
     setGitSkillLoading(false)
   }
 
@@ -146,7 +158,7 @@ export default function DashboardPage() {
       setSkillLoading(false)
 
       if (showToast) {
-        notify(`扫描完成，共检测到 ${nextApps.filter((app) => app.isInstalled).length} 个应用`, 'success')
+        notify(t('dashboard.notifications.scanComplete', { count: nextApps.filter((app) => app.isInstalled).length }), 'success')
       }
       return
     }
@@ -197,7 +209,7 @@ export default function DashboardPage() {
     setSkillLoading(false)
 
     if (showToast) {
-      notify(`扫描完成，共检测到 ${nextApps.filter((app) => app.isInstalled).length} 个应用`, 'success')
+      notify(t('dashboard.notifications.scanComplete', { count: nextApps.filter((app) => app.isInstalled).length }), 'success')
     }
   }
 
@@ -230,7 +242,7 @@ export default function DashboardPage() {
       void scanGitPathInBackground(appState.gitPath, sessionId)
       void scanSkillsInBackground(appState.apps, sessionId, showToast)
     } catch (error) {
-      notify(`加载失败: ${String(error)}`, 'error')
+      notify(t('dashboard.notifications.loadFailed', { error: String(error) }), 'error')
 
       if (isCurrentSession(sessionId)) {
         setAppLoading(false)
@@ -248,22 +260,43 @@ export default function DashboardPage() {
     return () => {
       scanSessionRef.current += 1
     }
-  }, [])
+  }, [language, notify, t])
 
   const filteredSkills = useMemo(() => {
+    const normalizedSkills = [...skills].sort((left, right) => left.name.localeCompare(right.name, language))
+
     if (!search.trim()) {
-      return skills
+      return normalizedSkills
     }
 
     const query = search.trim().toLowerCase()
-    return skills.filter((skill) => {
+    return normalizedSkills.filter((skill) => {
       return (
         skill.name.toLowerCase().includes(query) ||
         skill.description.toLowerCase().includes(query) ||
-        skill.sources.some((source) => source.toLowerCase().includes(query))
+        skill.sources
+          .map((source) => localizeSkillSource(source, language))
+          .some((source) => source.toLowerCase().includes(query))
       )
     })
-  }, [search, skills])
+  }, [language, search, skills])
+
+  const filteredManageSkills = useMemo(() => {
+    const normalizedSkills = [...manageSkillsEntries].sort((left, right) => left.name.localeCompare(right.name, language))
+
+    if (!manageSkillsSearch.trim()) {
+      return normalizedSkills
+    }
+
+    const query = manageSkillsSearch.trim().toLowerCase()
+    return normalizedSkills.filter((skill) => {
+      return (
+        skill.name.toLowerCase().includes(query) ||
+        skill.description.toLowerCase().includes(query) ||
+        skill.entryName.toLowerCase().includes(query)
+      )
+    })
+  }, [language, manageSkillsEntries, manageSkillsSearch])
 
   const sortedApps = useMemo(() => {
     return apps
@@ -293,62 +326,65 @@ export default function DashboardPage() {
 
   const heroText = useMemo(() => {
     if (appLoading) {
-      return '正在检测已安装的应用...'
+      return t('dashboard.hero.loadingApps')
     }
 
     if (skillLoading) {
-      return `技能后台扫描中，已完成 ${skillScanProgress.completed}/${skillScanProgress.total}`
+      return t('dashboard.hero.scanningSkills', {
+        completed: skillScanProgress.completed,
+        total: skillScanProgress.total,
+      })
     }
 
     if (gitSkillLoading) {
-      return '正在更新本地同步目录中的技能统计...'
+      return t('dashboard.hero.updatingLocalStats')
     }
 
-    return '统一管理所有 AI 应用的技能'
-  }, [appLoading, gitSkillLoading, skillLoading, skillScanProgress.completed, skillScanProgress.total])
+    return t('dashboard.hero.idle')
+  }, [appLoading, gitSkillLoading, skillLoading, skillScanProgress.completed, skillScanProgress.total, t])
 
-  const refreshButtonLabel = appLoading ? '检测应用中...' : skillLoading ? '后台扫描中...' : '扫描应用'
+  const refreshButtonLabel = appLoading ? t('dashboard.refresh.loadingApps') : skillLoading ? t('dashboard.refresh.scanningSkills') : t('dashboard.refresh.default')
   const activeOperationLabel = useMemo(() => {
     if (linkBusyState) {
       return linkBusyState.action === 'link'
-        ? `正在为 ${linkBusyState.appName} 创建链接...`
-        : `正在取消 ${linkBusyState.appName} 的链接...`
+        ? t('dashboard.activeOperation.linking', { name: linkBusyState.appName })
+        : t('dashboard.activeOperation.unlinking', { name: linkBusyState.appName })
     }
 
     if (gitBusyAction === 'aggregate') {
-      return '正在汇总技能到本地同步目录...'
+      return t('dashboard.activeOperation.aggregate')
     }
 
     if (gitBusyAction === 'push') {
-      return '正在推送到远程仓库...'
+      return t('dashboard.activeOperation.push')
     }
 
     if (gitBusyAction === 'pull') {
-      return '正在从远程仓库拉取...'
+      return t('dashboard.activeOperation.pull')
     }
 
     if (gitBusyAction === 'sync') {
-      return '正在同步本地与远程技能...'
+      return t('dashboard.activeOperation.sync')
     }
 
     if (gitBusyAction === 'saveConfig') {
-      return '正在保存 Git 配置...'
+      return t('dashboard.activeOperation.saveConfig')
     }
 
     if (gitBusyAction === 'pickPath') {
-      return '正在选择本地同步目录...'
+      return t('dashboard.activeOperation.pickPath')
     }
 
     if (gitBusyAction === 'changePath') {
-      return '正在切换本地同步目录...'
+      return t('dashboard.activeOperation.changePath')
     }
 
     return null
-  }, [gitBusyAction, linkBusyState])
+  }, [gitBusyAction, linkBusyState, t])
 
   async function handleToggleLink(app: AppRecord) {
     if (!app.isLinked && !gitPath) {
-      notify('请先配置 Git 同步目录，再执行链接。', 'error')
+      notify(t('dashboard.notifications.needGitPathBeforeLink'), 'error')
       return
     }
 
@@ -367,17 +403,17 @@ export default function DashboardPage() {
     try {
       if (app.isLinked) {
         await unlinkApp(app.id)
-        notify(`已取消 ${app.name} 的软链接`, 'success')
+        notify(t('dashboard.notifications.linkRemoved', { name: app.name }), 'success')
       } else {
         await linkApp(app.id, gitPath)
-        notify(`已创建 ${app.name} 的软链接`, 'success')
+        notify(t('dashboard.notifications.linkCreated', { name: app.name }), 'success')
       }
     } catch (error) {
       // Roll back the optimistic update on failure
       setApps((prev) =>
         prev.map((a) => (a.id === app.id ? { ...a, isLinked: app.isLinked } : a)),
       )
-      notify(`操作失败: ${String(error)}`, 'error')
+      notify(t('dashboard.notifications.operationFailed', { error: String(error) }), 'error')
       setBusyAppId(null)
       setLinkBusyState(null)
       return
@@ -394,7 +430,7 @@ export default function DashboardPage() {
     try {
       await openPathInFileManager(app.path)
     } catch (error) {
-      notify(`打开文件夹失败: ${String(error)}`, 'error')
+      notify(t('dashboard.notifications.openFolderFailed', { error: String(error) }), 'error')
     }
   }
 
@@ -402,7 +438,7 @@ export default function DashboardPage() {
     try {
       await launchApp(app.id)
     } catch (error) {
-      notify(`运行软件失败: ${String(error)}`, 'error')
+      notify(t('dashboard.notifications.launchFailed', { error: String(error) }), 'error')
     }
   }
 
@@ -414,13 +450,13 @@ export default function DashboardPage() {
     try {
       await openPathInFileManager(gitPath)
     } catch (error) {
-      notify(`打开本地同步目录失败: ${String(error)}`, 'error')
+      notify(t('dashboard.notifications.openSyncFolderFailed', { error: String(error) }), 'error')
     }
   }
 
   async function handleAggregateSkills() {
     if (gitBusy || !gitPath) {
-      notify('请先选择本地同步目录', 'error')
+      notify(t('dashboard.notifications.chooseSyncDirFirst'), 'error')
       return
     }
 
@@ -429,9 +465,9 @@ export default function DashboardPage() {
     try {
       await syncToGit(gitPath)
       await refreshData()
-      notify('已将所有应用中的 skills 汇总到本地同步目录', 'success')
+      notify(t('dashboard.notifications.aggregateSuccess'), 'success')
     } catch (error) {
-      notify(`汇总技能失败: ${String(error)}`, 'error')
+      notify(t('dashboard.notifications.aggregateFailed', { error: String(error) }), 'error')
     } finally {
       setGitBusyAction(null)
     }
@@ -447,7 +483,7 @@ export default function DashboardPage() {
     const selected = await openDialog({
       directory: true,
       multiple: false,
-      title: '选择技能同步目录',
+      title: t('dashboard.gitDialogTitle'),
     })
 
     if (typeof selected === 'string' && selected) {
@@ -472,9 +508,9 @@ export default function DashboardPage() {
       setConfirmGitPathOpen(false)
       setPendingGitPath('')
       await refreshData()
-      notify('本地同步目录已更新，当前技能已自动同步到新路径', 'success')
+      notify(t('dashboard.notifications.syncPathUpdated'), 'success')
     } catch (error) {
-      notify(`更新本地同步目录失败: ${String(error)}`, 'error')
+      notify(t('dashboard.notifications.updateSyncPathFailed', { error: String(error) }), 'error')
     } finally {
       setGitBusyAction(null)
     }
@@ -482,7 +518,7 @@ export default function DashboardPage() {
 
   async function handleSync() {
     if (gitBusy || !gitPath) {
-      notify('请先选择本地同步目录', 'error')
+      notify(t('dashboard.notifications.chooseSyncDirFirst'), 'error')
       return
     }
 
@@ -491,9 +527,9 @@ export default function DashboardPage() {
     try {
       const message = await gitSync(gitPath)
       await refreshData()
-      notify(message, 'success')
+      notify(localizeBackendSuccessMessage(message, language), 'success')
     } catch (error) {
-      notify(`同步失败: ${String(error)}`, 'error')
+      notify(t('dashboard.notifications.syncFailed', { error: String(error) }), 'error')
     } finally {
       setGitBusyAction(null)
     }
@@ -501,7 +537,7 @@ export default function DashboardPage() {
 
   async function handlePush() {
     if (gitBusy || !gitPath) {
-      notify('请先选择本地同步目录', 'error')
+      notify(t('dashboard.notifications.chooseSyncDirFirst'), 'error')
       return
     }
 
@@ -510,9 +546,9 @@ export default function DashboardPage() {
     try {
       await gitPush(gitPath)
       await refreshData()
-      notify('已推送到远程仓库', 'success')
+      notify(t('dashboard.notifications.pushSuccess'), 'success')
     } catch (error) {
-      notify(`推送失败: ${String(error)}`, 'error')
+      notify(t('dashboard.notifications.pushFailed', { error: String(error) }), 'error')
     } finally {
       setGitBusyAction(null)
     }
@@ -520,7 +556,7 @@ export default function DashboardPage() {
 
   async function handlePull() {
     if (gitBusy || !gitPath) {
-      notify('请先选择本地同步目录', 'error')
+      notify(t('dashboard.notifications.chooseSyncDirFirst'), 'error')
       return
     }
 
@@ -529,9 +565,9 @@ export default function DashboardPage() {
     try {
       const message = await gitPull(gitPath)
       await refreshData()
-      notify(message, 'success')
+      notify(localizeBackendSuccessMessage(message, language), 'success')
     } catch (error) {
-      notify(`拉取失败: ${String(error)}`, 'error')
+      notify(t('dashboard.notifications.pullFailed', { error: String(error) }), 'error')
     } finally {
       setGitBusyAction(null)
     }
@@ -547,9 +583,9 @@ export default function DashboardPage() {
     try {
       await persistGitConfig(config)
       setGitConfig(config)
-      notify('Git 配置已保存', 'success')
+      notify(t('dashboard.notifications.gitConfigSaved'), 'success')
     } catch (error) {
-      notify(`保存配置失败: ${String(error)}`, 'error')
+      notify(t('dashboard.notifications.saveConfigFailed', { error: String(error) }), 'error')
     } finally {
       setGitBusyAction(null)
     }
@@ -559,7 +595,7 @@ export default function DashboardPage() {
     const selected = await openDialog({
       directory: true,
       multiple: false,
-      title: '选择路径',
+      title: t('dashboard.pathDialogTitle'),
     })
 
     if (typeof selected === 'string' && selected) {
@@ -569,7 +605,7 @@ export default function DashboardPage() {
 
   async function handleAddCustomApp() {
     if (!customAppName.trim() || !customAppPath.trim()) {
-      notify('请填写应用名称和路径', 'error')
+      notify(t('dashboard.notifications.fillCustomAppFields'), 'error')
       return
     }
 
@@ -579,9 +615,9 @@ export default function DashboardPage() {
       setCustomAppPath('')
       setCustomModalOpen(false)
       await refreshData()
-      notify('自定义应用已添加', 'success')
+      notify(t('dashboard.notifications.customAppAdded'), 'success')
     } catch (error) {
-      notify(`添加失败: ${String(error)}`, 'error')
+      notify(t('dashboard.notifications.addFailed', { error: String(error) }), 'error')
     }
   }
 
@@ -602,9 +638,9 @@ export default function DashboardPage() {
       setEditModalOpen(false)
       setEditingApp(null)
       await refreshData()
-      notify('路径已更新', 'success')
+      notify(t('dashboard.notifications.pathUpdated'), 'success')
     } catch (error) {
-      notify(`更新路径失败: ${String(error)}`, 'error')
+      notify(t('dashboard.notifications.updatePathFailed', { error: String(error) }), 'error')
     }
   }
 
@@ -629,9 +665,78 @@ export default function DashboardPage() {
     setDeleteModalOpen(true)
   }
 
+  function closeManageSkillsModal(force = false) {
+    if (manageSkillsSaving && !force) {
+      return
+    }
+
+    setManageSkillsOpen(false)
+    setManageSkillsApp(null)
+    setManageSkillsLinkMode(null)
+    setManageSkillsEntries([])
+    setManageSkillsSearch('')
+    setManageSkillsLoading(false)
+  }
+
+  async function handleOpenManageSkills(app: AppRecord) {
+    if (!gitPath) {
+      notify(t('dashboard.notifications.needSyncDirBeforeManage'), 'error')
+      return
+    }
+
+    setManageSkillsApp(app)
+    setManageSkillsOpen(true)
+    setManageSkillsLoading(true)
+    setManageSkillsSearch('')
+
+    try {
+      const result = await getAppEnabledSkills(app.id, gitPath)
+      setManageSkillsLinkMode(result.linkMode)
+      setManageSkillsEntries(result.skills)
+
+      if (result.linkMode === 'legacy') {
+        notify(t('dashboard.notifications.legacyLinkDetected'), 'info')
+      }
+    } catch (error) {
+      closeManageSkillsModal()
+      notify(t('dashboard.notifications.loadManageSkillsFailed', { error: String(error) }), 'error')
+    } finally {
+      setManageSkillsLoading(false)
+    }
+  }
+
+  function handleToggleManagedSkill(entryName: string) {
+    setManageSkillsEntries((current) =>
+      current.map((skill) => (skill.entryName === entryName ? { ...skill, enabled: !skill.enabled } : skill)),
+    )
+  }
+
+  function handleSetAllManagedSkills(enabled: boolean) {
+    setManageSkillsEntries((current) => current.map((skill) => ({ ...skill, enabled })))
+  }
+
+  async function handleSaveManagedSkills() {
+    if (!manageSkillsApp || !gitPath) {
+      return
+    }
+
+    setManageSkillsSaving(true)
+    try {
+      const enabledEntries = manageSkillsEntries.filter((skill) => skill.enabled).map((skill) => skill.entryName)
+      await saveAppEnabledSkills(manageSkillsApp.id, gitPath, enabledEntries)
+      closeManageSkillsModal(true)
+      await refreshData()
+      notify(t('dashboard.notifications.manageSkillsUpdated', { name: manageSkillsApp.name }), 'success')
+    } catch (error) {
+      notify(t('dashboard.notifications.saveManageSkillsFailed', { error: String(error) }), 'error')
+    } finally {
+      setManageSkillsSaving(false)
+    }
+  }
+
   async function handleConfirmRenameSkill() {
     if (!selectedSkill || !renameValue.trim()) {
-      notify('请输入新的技能名称', 'error')
+      notify(t('dashboard.notifications.enterNewSkillName'), 'error')
       return
     }
 
@@ -642,9 +747,9 @@ export default function DashboardPage() {
       setConflictModalOpen(false)
       setSelectedSkill(null)
       await refreshData()
-      notify('技能已重命名', 'success')
+      notify(t('dashboard.notifications.skillRenamed'), 'success')
     } catch (error) {
-      notify(`重命名失败: ${String(error)}`, 'error')
+      notify(t('dashboard.notifications.renameFailed', { error: String(error) }), 'error')
     } finally {
       setSkillBusy(false)
     }
@@ -662,9 +767,9 @@ export default function DashboardPage() {
       setConflictModalOpen(false)
       setSelectedSkill(null)
       await refreshData()
-      notify('技能已删除', 'success')
+      notify(t('dashboard.notifications.skillDeleted'), 'success')
     } catch (error) {
-      notify(`删除失败: ${String(error)}`, 'error')
+      notify(t('dashboard.notifications.deleteFailed', { error: String(error) }), 'error')
     } finally {
       setSkillBusy(false)
     }
@@ -676,7 +781,7 @@ export default function DashboardPage() {
         <div className="hero__brand">
           <FigmaSkillIcon size={48} />
           <div>
-            <h1>AI Skills Manager</h1>
+            <h1>{t('dashboard.title')}</h1>
             <p className="hero__text">{heroText}</p>
           </div>
         </div>
@@ -686,7 +791,7 @@ export default function DashboardPage() {
             {refreshButtonLabel}
           </button>
           <ThemeToggle />
-          <Link className="button button--square" to="/settings" aria-label="设置">
+          <Link className="button button--square" to="/settings" aria-label={t('dashboard.openSettings')}>
             <Settings size={22} />
           </Link>
         </div>
@@ -694,19 +799,19 @@ export default function DashboardPage() {
 
       <section className="stats-grid">
         <article className="surface stat-card">
-          <span className="stat-card__label">检测到的应用</span>
+          <span className="stat-card__label">{t('dashboard.stats.detectedApps')}</span>
           <strong>{stats.appCount}</strong>
         </article>
         <article className="surface stat-card">
-          <span className="stat-card__label">技能文件总数</span>
-          <strong>{gitSkillLoading ? '扫描中...' : stats.skillCount}</strong>
+          <span className="stat-card__label">{t('dashboard.stats.skillFiles')}</span>
+          <strong>{gitSkillLoading ? t('dashboard.stats.scanning') : stats.skillCount}</strong>
         </article>
         <article className="surface stat-card">
-          <span className="stat-card__label">已链接应用</span>
+          <span className="stat-card__label">{t('dashboard.stats.linkedApps')}</span>
           <strong>{stats.linkedCount}</strong>
         </article>
         <article className="surface stat-card">
-          <span className="stat-card__label">冲突条目</span>
+          <span className="stat-card__label">{t('dashboard.stats.conflicts')}</span>
           <strong className={stats.conflictCount ? 'danger' : ''}>{stats.conflictCount}</strong>
         </article>
       </section>
@@ -727,22 +832,22 @@ export default function DashboardPage() {
               <div className="section-toolbar section-toolbar--applications">
                 <div className="tabs tabs--embedded">
                   <button className="tab tab--active" type="button" onClick={() => setActiveTab('applications')}>
-                    应用列表
+                    {t('dashboard.tabs.apps')}
                   </button>
                   <button className="tab" type="button" onClick={() => setActiveTab('skills')}>
-                    技能管理
+                    {t('dashboard.tabs.skills')}
                     {stats.conflictCount ? <span className="tab__count tab__count--danger">{stats.conflictCount}</span> : null}
                   </button>
                 </div>
                 <button className="button button--ghost" type="button" onClick={() => setCustomModalOpen(true)}>
                   <FolderPlus size={16} />
-                  添加自定义应用
+                  {t('dashboard.addCustomApp')}
                 </button>
               </div>
 
               {sortedApps.length === 0 ? (
                 <div className="surface empty-state">
-                  <p>{appLoading ? '正在检测应用，请稍候...' : '当前没有发现任何应用，点击上方“重新扫描”后再试。'}</p>
+                  <p>{appLoading ? t('dashboard.empty.appsLoading') : t('dashboard.empty.apps')}</p>
                 </div>
               ) : (
                 sortedApps.map((app) => (
@@ -754,10 +859,11 @@ export default function DashboardPage() {
                     busyLabel={
                       linkBusyState?.appId === app.id
                         ? linkBusyState.action === 'link'
-                          ? '链接中...'
-                          : '取消中...'
+                          ? t('dashboard.card.linking')
+                          : t('dashboard.card.unlinking')
                         : null
                     }
+                    onManageSkills={handleOpenManageSkills}
                     onToggleLink={handleToggleLink}
                     onOpenFolder={handleOpenAppFolder}
                     onLaunchApp={handleLaunchApp}
@@ -771,31 +877,31 @@ export default function DashboardPage() {
               <div className="section-toolbar section-toolbar--align-start section-toolbar--applications">
                 <div className="tabs tabs--embedded">
                   <button className="tab" type="button" onClick={() => setActiveTab('applications')}>
-                    应用列表
+                    {t('dashboard.tabs.apps')}
                   </button>
                   <button className="tab tab--active" type="button">
-                    技能管理
+                    {t('dashboard.tabs.skills')}
                     {stats.conflictCount ? <span className="tab__count">{stats.conflictCount}</span> : null}
                   </button>
                 </div>
                 <label className="search-box">
                   <Search size={16} />
-                  <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索技能..." />
+                  <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t('dashboard.dialog.searchSkills')} />
                 </label>
               </div>
 
               {stats.conflictCount ? (
                 <div className="surface conflict-banner">
                   <div className="conflict-banner__body">
-                    <strong>检测到 {stats.conflictCount} 个技能冲突</strong>
-                    <p>相同名称的技能在多个应用中存在不同版本，请在菜单中查看详情并处理。</p>
+                    <strong>{t('dashboard.conflicts.summary', { count: stats.conflictCount })}</strong>
+                    <p>{t('dashboard.conflicts.detail')}</p>
                   </div>
                 </div>
               ) : null}
 
               {filteredSkills.length === 0 ? (
                 <div className="surface empty-state">
-                  <p>{search ? '没有匹配的技能结果。' : skillLoading ? '技能正在后台分批扫描，结果会陆续显示。' : '当前没有可显示的技能文件。'}</p>
+                  <p>{search ? t('dashboard.empty.noSkillMatch') : skillLoading ? t('dashboard.empty.skillsLoading') : t('dashboard.empty.skills')}</p>
                 </div>
               ) : (
                 filteredSkills.map((skill) => (
@@ -831,13 +937,13 @@ export default function DashboardPage() {
                     className="button button--icon-ghost side-column__path-action"
                     type="button"
                     onClick={() => void handleOpenGitFolder()}
-                    aria-label="打开本地同步目录"
-                    title="打开文件夹"
+                    aria-label={t('dashboard.side.openSyncDirectory')}
+                    title={t('dashboard.side.openFolder')}
                   >
                     <FolderOpen size={18} />
                   </button>
                 </div>
-                <span className="side-column__path-label">本地同步目录</span>
+                <span className="side-column__path-label">{t('common.localSyncDirectory')}</span>
                 <strong className="side-column__path-value">{gitPath}</strong>
               </div>
               <div className="side-column__path-buttons">
@@ -848,7 +954,7 @@ export default function DashboardPage() {
                   disabled={gitBusy}
                 >
                   {gitBusyAction === 'pickPath' || gitBusyAction === 'changePath' ? <RefreshCw size={16} className="spin" /> : null}
-                  {gitBusyAction === 'pickPath' || gitBusyAction === 'changePath' ? '选择中...' : '更改路径'}
+                  {gitBusyAction === 'pickPath' || gitBusyAction === 'changePath' ? t('dashboard.side.changePathLoading') : t('dashboard.side.changePath')}
                 </button>
                 <button
                   className="button button--primary side-column__path-primary"
@@ -857,7 +963,7 @@ export default function DashboardPage() {
                   disabled={gitBusy}
                 >
                   {gitBusyAction === 'aggregate' ? <RefreshCw size={17} className="spin" /> : <Archive size={17} />}
-                  {gitBusyAction === 'aggregate' ? '汇总中...' : '汇总技能'}
+                  {gitBusyAction === 'aggregate' ? t('dashboard.side.aggregateLoading') : t('dashboard.side.aggregate')}
                 </button>
               </div>
             </>
@@ -870,177 +976,257 @@ export default function DashboardPage() {
               disabled={gitBusy}
             >
               {gitBusyAction === 'pickPath' ? <RefreshCw size={16} className="spin" /> : null}
-              {gitBusyAction === 'pickPath' ? '选择中...' : '选择本地同步目录'}
+              {gitBusyAction === 'pickPath' ? t('dashboard.side.pickDirectoryLoading') : t('dashboard.side.pickDirectory')}
             </button>
           ) : null}
         </aside>
       </main>
 
-      <Modal open={customModalOpen} title="添加自定义应用" onClose={() => setCustomModalOpen(false)}>
+      <Modal open={customModalOpen} title={t('dashboard.dialog.addCustomApp')} onClose={() => setCustomModalOpen(false)}>
         <div className="modal__body">
           <div className="field-group">
-            <label htmlFor="custom-app-name">应用名称</label>
+            <label htmlFor="custom-app-name">{t('common.appName')}</label>
             <input
               id="custom-app-name"
               value={customAppName}
               onChange={(event) => setCustomAppName(event.target.value)}
-              placeholder="例如 My Agent"
+              placeholder={t('dashboard.dialog.customAppNamePlaceholder')}
             />
           </div>
           <div className="field-group">
-            <label htmlFor="custom-app-path">技能目录</label>
+            <label htmlFor="custom-app-path">{t('common.skillDirectory')}</label>
             <div className="inline-field">
               <input
                 id="custom-app-path"
                 value={customAppPath}
                 onChange={(event) => setCustomAppPath(event.target.value)}
-                placeholder="/path/to/skills"
+                placeholder={t('dashboard.dialog.customAppPathPlaceholder')}
               />
               <button className="button button--ghost" type="button" onClick={() => void chooseCustomPath(setCustomAppPath)}>
-                浏览
+                {t('common.browse')}
               </button>
             </div>
           </div>
         </div>
         <footer className="modal__footer">
           <button className="button button--ghost" type="button" onClick={() => setCustomModalOpen(false)}>
-            取消
+            {t('common.cancel')}
           </button>
           <button className="button button--primary" type="button" onClick={() => void handleAddCustomApp()}>
-            添加
+            {t('dashboard.dialog.add')}
           </button>
         </footer>
       </Modal>
 
-      <Modal open={editModalOpen} title={editingApp ? `设置 ${editingApp.name} 路径` : '设置路径'} onClose={() => setEditModalOpen(false)}>
+      <Modal open={editModalOpen} title={editingApp ? t('dashboard.dialog.editPath', { name: editingApp.name }) : t('dashboard.dialog.editPathFallback')} onClose={() => setEditModalOpen(false)}>
         <div className="modal__body">
           <div className="field-group">
-            <label htmlFor="edit-app-path">技能目录</label>
+            <label htmlFor="edit-app-path">{t('common.skillDirectory')}</label>
             <div className="inline-field">
               <input
                 id="edit-app-path"
                 value={editPathValue}
                 onChange={(event) => setEditPathValue(event.target.value)}
-                placeholder="清空则恢复默认路径"
+                placeholder={t('dashboard.dialog.emptyPathPlaceholder')}
               />
               <button className="button button--ghost" type="button" onClick={() => void chooseCustomPath(setEditPathValue)}>
-                浏览
+                {t('common.browse')}
               </button>
             </div>
           </div>
         </div>
         <footer className="modal__footer">
           <button className="button button--ghost" type="button" onClick={() => setEditPathValue('')}>
-            恢复默认
+            {t('dashboard.dialog.restoreDefault')}
           </button>
           <button className="button button--primary" type="button" onClick={() => void handleSavePath()}>
-            保存
+            {t('common.save')}
           </button>
         </footer>
       </Modal>
 
-      <Modal open={detailModalOpen} title={selectedSkill?.name ?? '技能详情'} onClose={() => setDetailModalOpen(false)}>
+      <Modal open={detailModalOpen} title={selectedSkill?.name ?? t('dashboard.dialog.skillDetails')} onClose={() => setDetailModalOpen(false)}>
         {selectedSkill ? (
           <>
             <div className="modal__body modal__body--stack">
               <div className="detail-grid">
                 <div className="detail-field">
-                  <span>描述</span>
-                  <strong>{selectedSkill.description || '暂无描述'}</strong>
+                  <span>{t('common.description')}</span>
+                  <strong>{selectedSkill.description || t('dashboard.dialog.noDescription')}</strong>
                 </div>
                 <div className="detail-field">
-                  <span>来源</span>
-                  <strong>{selectedSkill.sources.join(', ')}</strong>
+                  <span>{t('common.source')}</span>
+                  <strong>{selectedSkill.sources.map((source) => localizeSkillSource(source, language)).join(', ')}</strong>
                 </div>
                 <div className="detail-field">
-                  <span>路径</span>
+                  <span>{t('common.path')}</span>
                   <strong className="detail-field__path">{selectedSkill.path}</strong>
                 </div>
                 <div className="detail-field">
-                  <span>大小</span>
+                  <span>{t('common.size')}</span>
                   <strong>{(selectedSkill.size / 1024).toFixed(1)} KB</strong>
                 </div>
                 <div className="detail-field">
-                  <span>文件数</span>
+                  <span>{t('common.fileCount')}</span>
                   <strong>{selectedSkill.fileCount}</strong>
                 </div>
                 <div className="detail-field">
-                  <span>修改时间</span>
+                  <span>{t('common.modifiedAt')}</span>
                   <strong>{selectedSkill.modified}</strong>
                 </div>
               </div>
             </div>
             <footer className="modal__footer">
               <button className="button button--ghost" type="button" onClick={() => setDetailModalOpen(false)}>
-                关闭
+                {t('common.close')}
               </button>
               <button className="button button--primary" type="button" onClick={() => {
                 setDetailModalOpen(false)
                 handleStartRenameSkill(selectedSkill)
               }}>
-                重命名
+                {t('dashboard.dialog.renameAction')}
               </button>
             </footer>
           </>
         ) : null}
       </Modal>
 
-      <Modal open={renameModalOpen} title={selectedSkill ? `重命名 ${selectedSkill.name}` : '重命名技能'} onClose={() => setRenameModalOpen(false)}>
+      <Modal open={renameModalOpen} title={selectedSkill ? t('dashboard.dialog.renameSkill', { name: selectedSkill.name }) : t('dashboard.dialog.renameSkillFallback')} onClose={() => setRenameModalOpen(false)}>
         <div className="modal__body">
           <div className="field-group">
-            <label htmlFor="rename-skill-name">技能名称</label>
+            <label htmlFor="rename-skill-name">{t('common.skillName')}</label>
             <input
               id="rename-skill-name"
               value={renameValue}
               onChange={(event) => setRenameValue(event.target.value)}
-              placeholder="输入新的技能名称"
+              placeholder={t('dashboard.dialog.renameSkillPlaceholder')}
             />
           </div>
         </div>
         <footer className="modal__footer">
           <button className="button button--ghost" type="button" onClick={() => setRenameModalOpen(false)}>
-            取消
+            {t('common.cancel')}
           </button>
           <button className="button button--primary" type="button" onClick={() => void handleConfirmRenameSkill()} disabled={skillBusy}>
-            保存
+            {t('common.save')}
           </button>
         </footer>
       </Modal>
 
-      <Modal open={deleteModalOpen} title={selectedSkill ? `删除 ${selectedSkill.name}` : '删除技能'} onClose={() => setDeleteModalOpen(false)}>
+      <Modal
+        open={manageSkillsOpen}
+        title={manageSkillsApp ? t('dashboard.dialog.manageSkills', { name: manageSkillsApp.name }) : t('dashboard.dialog.manageSkillsFallback')}
+        onClose={closeManageSkillsModal}
+      >
         <div className="modal__body modal__body--stack">
-          <p className="modal__copy">删除后将移除技能文件或目录，此操作不可撤销。</p>
+          <p className="modal__copy">
+            {manageSkillsLinkMode === 'legacy'
+              ? t('dashboard.dialog.manageSkillsLegacyHint')
+              : t('dashboard.dialog.manageSkillsHint')}
+          </p>
+
+          <div className="manage-skills__toolbar">
+            <label className="search-box manage-skills__search">
+              <Search size={16} />
+              <input value={manageSkillsSearch} onChange={(event) => setManageSkillsSearch(event.target.value)} placeholder={t('dashboard.dialog.searchSkills')} />
+            </label>
+            <div className="manage-skills__actions">
+              <button className="button button--ghost button--compact" type="button" onClick={() => handleSetAllManagedSkills(true)} disabled={manageSkillsLoading}>
+                {t('dashboard.dialog.selectAll')}
+              </button>
+              <button className="button button--ghost button--compact" type="button" onClick={() => handleSetAllManagedSkills(false)} disabled={manageSkillsLoading}>
+                {t('dashboard.dialog.clearAll')}
+              </button>
+            </div>
+          </div>
+
+          <div className="manage-skills__summary">
+            {t('dashboard.dialog.enabledSummary', {
+              enabled: manageSkillsEntries.filter((skill) => skill.enabled).length,
+              total: manageSkillsEntries.length,
+            })}
+          </div>
+
+          {manageSkillsLoading ? (
+            <div className="surface empty-state">
+              <p>{t('dashboard.dialog.manageSkillsLoading')}</p>
+            </div>
+          ) : filteredManageSkills.length === 0 ? (
+            <div className="surface empty-state">
+              <p>{manageSkillsSearch ? t('dashboard.empty.noSkillMatch') : t('dashboard.dialog.manageSkillsEmpty')}</p>
+            </div>
+          ) : (
+            <div className="manage-skills__list">
+              {filteredManageSkills.map((skill) => (
+                <article key={skill.entryName} className={`surface manage-skills__item ${skill.enabled ? 'manage-skills__item--enabled' : ''}`}>
+                  <label className="manage-skills__item-main">
+                    <input
+                      className="manage-skills__checkbox"
+                      type="checkbox"
+                      checked={skill.enabled}
+                      onChange={() => handleToggleManagedSkill(skill.entryName)}
+                    />
+                    <div className="manage-skills__item-copy">
+                      <strong>{skill.name}</strong>
+                      <span>{skill.description || skill.entryName}</span>
+                      <small>{skill.entryName}</small>
+                    </div>
+                  </label>
+                  <span className="manage-skills__status">
+                    {skill.enabled ? t('dashboard.dialog.enabled') : t('dashboard.dialog.disabled')}
+                  </span>
+                </article>
+              ))}
+            </div>
+          )}
+        </div>
+        <footer className="modal__footer">
+          <button className="button button--ghost" type="button" onClick={() => closeManageSkillsModal()} disabled={manageSkillsSaving}>
+            {t('common.cancel')}
+          </button>
+          <button className="button button--primary" type="button" onClick={() => void handleSaveManagedSkills()} disabled={manageSkillsLoading || manageSkillsSaving}>
+            {manageSkillsSaving ? t('common.saving') : t('common.save')}
+          </button>
+        </footer>
+      </Modal>
+
+      <Modal open={deleteModalOpen} title={selectedSkill ? t('dashboard.dialog.deleteSkill', { name: selectedSkill.name }) : t('dashboard.dialog.deleteSkillFallback')} onClose={() => setDeleteModalOpen(false)}>
+        <div className="modal__body modal__body--stack">
+          <p className="modal__copy">{t('dashboard.dialog.deleteWarning')}</p>
           {selectedSkill ? (
             <div className="detail-field">
-              <span>目标路径</span>
+              <span>{t('common.targetPath')}</span>
               <strong className="detail-field__path">{selectedSkill.path}</strong>
             </div>
           ) : null}
         </div>
         <footer className="modal__footer">
           <button className="button button--ghost" type="button" onClick={() => setDeleteModalOpen(false)}>
-            取消
+            {t('common.cancel')}
           </button>
           <button className="button button--primary button--danger" type="button" onClick={() => void handleConfirmDeleteSkill()} disabled={skillBusy}>
-            删除
+            {t('common.delete')}
           </button>
         </footer>
       </Modal>
 
-      <Modal open={conflictModalOpen} title={selectedSkill ? `${selectedSkill.name} 存在冲突` : '技能冲突'} onClose={() => setConflictModalOpen(false)}>
+      <Modal open={conflictModalOpen} title={selectedSkill ? t('dashboard.dialog.conflictTitle', { name: selectedSkill.name }) : t('dashboard.dialog.conflictFallback')} onClose={() => setConflictModalOpen(false)}>
         <div className="modal__body modal__body--stack">
           {selectedSkill ? (
             <>
               <p className="modal__copy">
-                这个技能在多个应用中存在不同版本。当前检测到 {selectedSkill.duplicateCount} 份来源，涉及 {selectedSkill.sources.join('、')}。
+                {t('dashboard.dialog.conflictMessage', {
+                  count: selectedSkill.duplicateCount,
+                  sources: selectedSkill.sources.map((source) => localizeSkillSource(source, language)).join(language === 'en-US' ? ', ' : '、'),
+                })}
               </p>
               <div className="detail-grid">
                 <div className="detail-field">
-                  <span>规范名</span>
+                  <span>{t('dashboard.dialog.canonicalName')}</span>
                   <strong>{selectedSkill.canonicalName}</strong>
                 </div>
                 <div className="detail-field">
-                  <span>路径</span>
+                  <span>{t('common.path')}</span>
                   <strong className="detail-field__path">{selectedSkill.path}</strong>
                 </div>
               </div>
@@ -1049,7 +1235,7 @@ export default function DashboardPage() {
         </div>
         <footer className="modal__footer">
           <button className="button button--ghost" type="button" onClick={() => setConflictModalOpen(false)}>
-            稍后处理
+            {t('dashboard.dialog.later')}
           </button>
           <button className="button button--ghost" type="button" onClick={() => {
             setConflictModalOpen(false)
@@ -1057,7 +1243,7 @@ export default function DashboardPage() {
               handleAskDeleteSkill(selectedSkill)
             }
           }}>
-            删除当前项
+            {t('dashboard.dialog.deleteCurrent')}
           </button>
           <button className="button button--primary" type="button" onClick={() => {
             setConflictModalOpen(false)
@@ -1065,20 +1251,20 @@ export default function DashboardPage() {
               handleStartRenameSkill(selectedSkill)
             }
           }}>
-            重命名当前项
+            {t('dashboard.dialog.renameCurrent')}
           </button>
         </footer>
       </Modal>
 
-      <Modal open={confirmGitPathOpen} title="确认更改本地同步目录" onClose={() => {
+      <Modal open={confirmGitPathOpen} title={t('dashboard.dialog.confirmChangeSyncDir')} onClose={() => {
         setConfirmGitPathOpen(false)
         setPendingGitPath('')
       }}>
         <div className="modal__body modal__body--stack">
-          <p className="modal__copy">确定要把所有 skill 都同步到这个目录进行统一管理吗？</p>
+          <p className="modal__copy">{t('dashboard.dialog.confirmChangeSyncDirMessage')}</p>
           {pendingGitPath ? (
             <div className="detail-field">
-              <span>目标目录</span>
+              <span>{t('common.targetDirectory')}</span>
               <strong className="detail-field__path">{pendingGitPath}</strong>
             </div>
           ) : null}
@@ -1096,10 +1282,10 @@ export default function DashboardPage() {
             }}
             disabled={gitBusyAction === 'changePath'}
           >
-            取消
+            {t('common.cancel')}
           </button>
           <button className="button button--primary" type="button" onClick={() => void handleConfirmGitFolderChange()} disabled={gitBusyAction === 'changePath'}>
-            {gitBusyAction === 'changePath' ? '同步中...' : '确定并同步'}
+            {gitBusyAction === 'changePath' ? t('dashboard.dialog.syncing') : t('dashboard.dialog.confirmAndSync')}
           </button>
         </footer>
       </Modal>

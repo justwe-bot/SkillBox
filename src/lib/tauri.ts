@@ -1,14 +1,18 @@
 import { invoke } from '@tauri-apps/api/tauri'
 import type {
+  AppEnabledSkillsState,
   AppRecord,
   BackendApp,
+  BackendAppEnabledSkillsResponse,
   BackendSkillFile,
   DownloadUpdateResult,
   GitSyncConfig,
+  ManagedSkillEntry,
   ScanAppsResponse,
   SkillRecord,
   UpdateCheckResult,
 } from '../types'
+import { LOCAL_SYNC_SOURCE } from './i18n'
 
 interface SkillInventoryChunk {
   app: AppRecord
@@ -24,11 +28,13 @@ function mapApp(app: BackendApp): AppRecord {
     path: app.path,
     icon: app.icon,
     skillCount: app.skill_count,
+    enabledSkillCount: app.enabled_skill_count,
     isLinked: app.is_linked,
     isInstalled: app.is_installed,
     isCustom: app.is_custom ?? false,
     backupPath: app.backup_path,
     customPath: app.custom_path,
+    linkMode: app.link_mode,
   }
 }
 
@@ -70,6 +76,39 @@ export function linkApp(appId: string, gitPath: string) {
 
 export function unlinkApp(appId: string) {
   return invoke<void>('unlink_app', { appId })
+}
+
+function mapManagedSkillEntry(skill: BackendAppEnabledSkillsResponse['skills'][number]): ManagedSkillEntry {
+  return {
+    id: `managed:${skill.entryName}`,
+    entryName: skill.entryName,
+    name: skill.name,
+    description: skill.description || skill.path,
+    path: skill.path,
+    size: skill.size,
+    modified: skill.modified,
+    sources: [LOCAL_SYNC_SOURCE],
+    conflicts: false,
+    duplicateCount: 1,
+    canonicalName: skill.canonical_name || skill.name.toLowerCase(),
+    contentHashes: [skill.content_hash],
+    fileCount: skill.file_count,
+    enabled: skill.enabled,
+  }
+}
+
+export async function getAppEnabledSkills(appId: string, gitPath: string): Promise<AppEnabledSkillsState> {
+  const result = await invoke<BackendAppEnabledSkillsResponse>('get_app_enabled_skills', { appId, gitPath })
+  return {
+    appId: result.appId,
+    linkMode: result.linkMode,
+    enabledEntries: result.enabledEntries,
+    skills: result.skills.map(mapManagedSkillEntry),
+  }
+}
+
+export function saveAppEnabledSkills(appId: string, gitPath: string, enabledEntries: string[]) {
+  return invoke<void>('save_app_enabled_skills', { appId, gitPath, enabledEntries })
 }
 
 export function syncToGit(repoPath: string) {

@@ -1,4 +1,5 @@
 import type { PropsWithChildren } from 'react'
+import { useI18n } from '../lib/i18n-context'
 
 interface ModalProps extends PropsWithChildren {
   open: boolean
@@ -7,6 +8,8 @@ interface ModalProps extends PropsWithChildren {
 }
 
 export function Modal({ open, title, onClose, children }: ModalProps) {
+  const { t } = useI18n()
+
   if (!open) {
     return null
   }
@@ -24,7 +27,7 @@ export function Modal({ open, title, onClose, children }: ModalProps) {
           <div className="modal__title-wrap">
             <h2>{title}</h2>
           </div>
-          <button className="modal__close" type="button" onClick={onClose} aria-label="关闭">
+          <button className="modal__close" type="button" onClick={onClose} aria-label={t('modal.close')}>
             ×
           </button>
         </header>

@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { AlertCircle, Eye, MoreVertical, PencilLine, Trash2 } from 'lucide-react'
 import type { SkillRecord } from '../types'
+import { localizeSkillSource } from '../lib/i18n'
+import { useI18n } from '../lib/i18n-context'
 import { CodexSkillGlyph } from './CodexSkillGlyph'
 
 interface SkillItemProps {
@@ -20,7 +22,9 @@ function formatSize(size: number) {
 }
 
 export function SkillItem({ skill, onView, onRename, onDelete, onResolveConflict }: SkillItemProps) {
+  const { language, t } = useI18n()
   const [menuOpen, setMenuOpen] = useState(false)
+  const localizedSources = skill.sources.map((source) => localizeSkillSource(source, language)).join(', ')
 
   function handleAction(action: () => void) {
     setMenuOpen(false)
@@ -39,13 +43,13 @@ export function SkillItem({ skill, onView, onRename, onDelete, onResolveConflict
             {skill.conflicts ? (
               <span className="badge badge--danger">
                 <AlertCircle size={12} />
-                冲突
+                {t('dashboard.skill.conflict')}
               </span>
             ) : null}
           </div>
           <p className="muted ellipsis">{skill.description}</p>
           <div className="skill-item__tags">
-            <span>来源: {skill.sources.join(', ')}</span>
+            <span>{t('dashboard.skill.sourceLabel', { sources: localizedSources })}</span>
             <span>{formatSize(skill.size)}</span>
             <span>{skill.modified}</span>
           </div>
@@ -55,7 +59,7 @@ export function SkillItem({ skill, onView, onRename, onDelete, onResolveConflict
       <div className="skill-item__actions">
         {skill.conflicts ? (
           <button className="button button--ghost button--compact" type="button" onClick={() => onResolveConflict(skill)}>
-            解决冲突
+            {t('dashboard.skill.resolveConflict')}
           </button>
         ) : null}
 
@@ -74,11 +78,11 @@ export function SkillItem({ skill, onView, onRename, onDelete, onResolveConflict
             <div className="skill-item__menu-list" role="menu">
               <button className="skill-item__menu-item" type="button" role="menuitem" onClick={() => handleAction(() => onView(skill))}>
                 <Eye size={15} />
-                查看详情
+                {t('dashboard.skill.viewDetails')}
               </button>
               <button className="skill-item__menu-item" type="button" role="menuitem" onClick={() => handleAction(() => onRename(skill))}>
                 <PencilLine size={15} />
-                重命名
+                {t('common.rename')}
               </button>
               <button
                 className="skill-item__menu-item skill-item__menu-item--danger"
@@ -87,7 +91,7 @@ export function SkillItem({ skill, onView, onRename, onDelete, onResolveConflict
                 onClick={() => handleAction(() => onDelete(skill))}
               >
                 <Trash2 size={15} />
-                删除
+                {t('dashboard.skill.delete')}
               </button>
             </div>
           ) : null}

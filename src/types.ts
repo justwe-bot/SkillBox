@@ -4,11 +4,13 @@ export interface BackendApp {
   path: string
   icon: string
   skill_count: number
+  enabled_skill_count: number
   is_linked: boolean
   is_installed: boolean
   is_custom?: boolean
   backup_path?: string | null
   custom_path?: string | null
+  link_mode?: 'legacy' | 'managed' | null
 }
 
 export interface AppRecord {
@@ -17,11 +19,13 @@ export interface AppRecord {
   path: string
   icon: string
   skillCount: number
+  enabledSkillCount: number
   isLinked: boolean
   isInstalled: boolean
   isCustom: boolean
   backupPath?: string | null
   customPath?: string | null
+  linkMode?: 'legacy' | 'managed' | null
 }
 
 export interface BackendSkillFile {
@@ -64,11 +68,14 @@ export interface GitSyncConfig {
   branch: string
 }
 
+export type AppLanguage = 'zh-CN' | 'en-US'
+
 export interface AppPreferences {
   autoScan: boolean
   autoSync: boolean
   desktopNotifications: boolean
   theme: 'system' | 'light' | 'dark'
+  language: AppLanguage
 }
 
 export interface UpdateCheckResult {
@@ -86,4 +93,28 @@ export interface DownloadUpdateResult {
   fileName: string
   filePath: string
   releaseUrl: string
+}
+
+export interface BackendManagedSkillEntry extends BackendSkillFile {
+  entryName: string
+  enabled: boolean
+}
+
+export interface BackendAppEnabledSkillsResponse {
+  appId: string
+  linkMode: 'legacy' | 'managed'
+  enabledEntries: string[]
+  skills: BackendManagedSkillEntry[]
+}
+
+export interface ManagedSkillEntry extends SkillRecord {
+  entryName: string
+  enabled: boolean
+}
+
+export interface AppEnabledSkillsState {
+  appId: string
+  linkMode: 'legacy' | 'managed'
+  enabledEntries: string[]
+  skills: ManagedSkillEntry[]
 }

@@ -12,7 +12,7 @@ use figma::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,11 +27,13 @@ struct SkillApp {
     path: String,
     icon: String,
     skill_count: usize,
+    enabled_skill_count: usize,
     is_linked: bool,
     is_installed: bool,
     is_custom: bool,
     backup_path: Option<String>,
     custom_path: Option<String>,
+    link_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,11 +50,47 @@ struct SkillFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AppConfig {
+    #[serde(default)]
     git_path: Option<String>,
     #[serde(default = "default_git_config")]
     git_config: GitSyncConfig,
-    custom_paths: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    custom_paths: HashMap<String, String>,
+    #[serde(default)]
+    enabled_skills_by_app: HashMap<String, Vec<String>>,
+    #[serde(default)]
     figma_api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedSkillEntry {
+    entry_name: String,
+    name: String,
+    path: String,
+    size: u64,
+    modified: String,
+    description: String,
+    canonical_name: String,
+    content_hash: String,
+    file_count: usize,
+    enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppEnabledSkillsResponse {
+    app_id: String,
+    link_mode: String,
+    enabled_entries: Vec<String>,
+    skills: Vec<ManagedSkillEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncEnabledSkillsConfig {
+    #[serde(default)]
+    enabled_skills_by_app: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +168,7 @@ struct GitHubRelease {
 }
 
 const SYNC_MANIFEST_FILE: &str = ".skillbox-sync.json";
+const SYNC_ENABLED_SKILLS_FILE: &str = ".skillbox-enabled-skills.json";
 const GITHUB_REPOSITORY: &str = "justwe-bot/SkillBox";
 const GITHUB_REPOSITORY_URL: &str = "https://github.com/justwe-bot/SkillBox";
 const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "skillbox://update-download-progress";
@@ -1069,7 +1108,8 @@ fn load_config() -> AppConfig {
     AppConfig {
         git_path: None,
         git_config: default_git_config(),
-        custom_paths: std::collections::HashMap::new(),
+        custom_paths: HashMap::new(),
+        enabled_skills_by_app: HashMap::new(),
         figma_api_key: None,
     }
 }
@@ -1080,6 +1120,380 @@ fn save_config(config: &AppConfig) -> Result<(), String> {
     let config_path = config_dir.join("config.json");
     let content = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
     fs::write(&config_path, content).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn get_sync_enabled_skills_path(sync_dir: &Path) -> PathBuf {
+    sync_dir.join(SYNC_ENABLED_SKILLS_FILE)
+}
+
+fn load_sync_enabled_skills(sync_dir: &Path) -> Result<Option<HashMap<String, Vec<String>>>, String> {
+    let config_path = get_sync_enabled_skills_path(sync_dir);
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+    if let Ok(config) = serde_json::from_str::<SyncEnabledSkillsConfig>(&content) {
+        return Ok(Some(config.enabled_skills_by_app));
+    }
+
+    if let Ok(map) = serde_json::from_str::<HashMap<String, Vec<String>>>(&content) {
+        return Ok(Some(map));
+    }
+
+    Err(format!(
+        "无法解析同步目录中的启用配置文件: {}",
+        config_path.to_string_lossy()
+    ))
+}
+
+fn save_sync_enabled_skills(
+    sync_dir: &Path,
+    enabled_skills_by_app: &HashMap<String, Vec<String>>,
+) -> Result<(), String> {
+    fs::create_dir_all(sync_dir).map_err(|e| e.to_string())?;
+    let config_path = get_sync_enabled_skills_path(sync_dir);
+    let content = serde_json::to_string_pretty(&SyncEnabledSkillsConfig {
+        enabled_skills_by_app: enabled_skills_by_app.clone(),
+    })
+    .map_err(|e| e.to_string())?;
+    fs::write(&config_path, content).map_err(|e| e.to_string())
+}
+
+fn load_effective_enabled_skills(
+    config: &AppConfig,
+    sync_dir: &Path,
+) -> Result<HashMap<String, Vec<String>>, String> {
+    match load_sync_enabled_skills(sync_dir)? {
+        Some(value) => Ok(value),
+        None => Ok(config.enabled_skills_by_app.clone()),
+    }
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<(), String> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+
+    if metadata.file_type().is_symlink() {
+        return fs::remove_file(path)
+            .or_else(|_| fs::remove_dir(path))
+            .map_err(|e| e.to_string());
+    }
+
+    if metadata.is_dir() {
+        fs::remove_dir_all(path).map_err(|e| e.to_string())
+    } else {
+        fs::remove_file(path).map_err(|e| e.to_string())
+    }
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    let left_real = left.canonicalize().ok();
+    let right_real = right.canonicalize().ok();
+
+    match (left_real, right_real) {
+        (Some(left_real), Some(right_real)) => left_real == right_real,
+        _ => false,
+    }
+}
+
+fn resolve_link_target(link_path: &Path) -> Option<PathBuf> {
+    let target = fs::read_link(link_path).ok()?;
+    if target.is_absolute() {
+        Some(target)
+    } else {
+        link_path.parent().map(|parent| parent.join(target))
+    }
+}
+
+fn resolve_managed_link_dir(app_id: &str) -> PathBuf {
+    get_config_path().join("linked_apps").join(app_id)
+}
+
+fn sanitize_sync_entry_name(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("技能条目不能为空".to_string());
+    }
+
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        return Err(format!("技能条目不能是绝对路径: {}", trimmed));
+    }
+
+    if path.components().any(|component| !matches!(component, std::path::Component::Normal(_))) {
+        return Err(format!("技能条目必须是同步目录内的相对路径: {}", trimmed));
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn list_sync_dir_entries(sync_dir: &Path) -> Result<Vec<String>, String> {
+    if !sync_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = Vec::new();
+    for skill in collect_skill_entries(sync_dir)? {
+        let skill_path = PathBuf::from(&skill.path);
+        let relative = skill_path
+            .strip_prefix(sync_dir)
+            .map_err(|_| format!("技能路径不在同步目录中: {}", skill.path))?;
+        let entry_name = sanitize_sync_entry_name(&relative.to_string_lossy())?;
+        if !entries.contains(&entry_name) {
+            entries.push(entry_name);
+        }
+    }
+
+    entries.sort_by_key(|value| value.to_lowercase());
+    Ok(entries)
+}
+
+fn collect_sync_dir_skills(sync_dir: &Path) -> Result<Vec<ManagedSkillEntry>, String> {
+    let mut skills = Vec::new();
+
+    for skill in collect_skill_entries(sync_dir)? {
+        let skill_path = PathBuf::from(&skill.path);
+        let relative = skill_path
+            .strip_prefix(sync_dir)
+            .map_err(|_| format!("技能路径不在同步目录中: {}", skill.path))?;
+        let entry_name = sanitize_sync_entry_name(&relative.to_string_lossy())?;
+
+        skills.push(ManagedSkillEntry {
+            entry_name,
+            name: skill.name,
+            path: skill.path,
+            size: skill.size,
+            modified: skill.modified,
+            description: skill.description,
+            canonical_name: skill.canonical_name,
+            content_hash: skill.content_hash,
+            file_count: skill.file_count,
+            enabled: false,
+        });
+    }
+
+    skills.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    Ok(skills)
+}
+
+fn get_saved_enabled_entries(
+    app_id: &str,
+    config: &AppConfig,
+    sync_dir: &Path,
+) -> Result<Vec<String>, String> {
+    let available = list_sync_dir_entries(sync_dir)?;
+    let available_set: HashSet<String> = available.iter().cloned().collect();
+    let enabled_skills_by_app = load_effective_enabled_skills(config, sync_dir)?;
+
+    match enabled_skills_by_app.get(app_id) {
+        Some(saved_entries) => {
+            let mut entries = Vec::new();
+            for value in saved_entries {
+                let entry = sanitize_sync_entry_name(value)?;
+                if available_set.contains(&entry) && !entries.contains(&entry) {
+                    entries.push(entry);
+                    continue;
+                }
+
+                let nested_prefix = format!("{}/", entry);
+                for available in &available {
+                    if available.starts_with(&nested_prefix) && !entries.contains(available) {
+                        entries.push(available.clone());
+                    }
+                }
+            }
+            Ok(entries)
+        }
+        None => Ok(available),
+    }
+}
+
+fn save_enabled_entries_for_app(
+    config: &mut AppConfig,
+    sync_dir: &Path,
+    app_id: &str,
+    enabled_entries: Vec<String>,
+) -> Result<(), String> {
+    config
+        .enabled_skills_by_app
+        .insert(app_id.to_string(), enabled_entries.clone());
+
+    let mut effective_enabled_skills = load_effective_enabled_skills(config, sync_dir)?;
+    effective_enabled_skills.insert(app_id.to_string(), enabled_entries);
+    save_sync_enabled_skills(sync_dir, &effective_enabled_skills)?;
+    save_config(config)
+}
+
+fn create_symlink(source: &Path, target: &Path) -> Result<(), String> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(source, target).map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(windows)]
+    {
+        if source.is_dir() {
+            std::os::windows::fs::symlink_dir(source, target).map_err(|e| e.to_string())?;
+        } else {
+            std::os::windows::fs::symlink_file(source, target).map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
+fn rebuild_managed_skill_dir(
+    app_id: &str,
+    sync_dir: &Path,
+    enabled_entries: &[String],
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(sync_dir).map_err(|e| e.to_string())?;
+
+    let managed_dir = resolve_managed_link_dir(app_id);
+    remove_path_if_exists(&managed_dir)?;
+    fs::create_dir_all(&managed_dir).map_err(|e| e.to_string())?;
+
+    for value in enabled_entries {
+        let entry_name = sanitize_sync_entry_name(value)?;
+        let source = sync_dir.join(&entry_name);
+        if !source.exists() {
+            continue;
+        }
+
+        let target = managed_dir.join(&entry_name);
+        create_symlink(&source, &target)?;
+    }
+
+    Ok(managed_dir)
+}
+
+fn ensure_app_points_to_managed_dir(
+    skill_dir: &Path,
+    backup_dir: &Path,
+    managed_dir: &Path,
+) -> Result<(), String> {
+    if let Ok(metadata) = fs::symlink_metadata(skill_dir) {
+        if metadata.file_type().is_symlink() {
+            remove_path_if_exists(skill_dir)?;
+        } else if !backup_dir.exists() {
+            fs::rename(skill_dir, backup_dir).map_err(|e| e.to_string())?;
+        }
+    }
+
+    if let Some(parent) = skill_dir.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    if !skill_dir.exists() {
+        create_symlink(managed_dir, skill_dir)?;
+    }
+
+    Ok(())
+}
+
+fn detect_link_mode(skill_dir: &Path, app_id: &str, config: &AppConfig) -> Option<String> {
+    let metadata = fs::symlink_metadata(skill_dir).ok()?;
+    if !metadata.file_type().is_symlink() {
+        return None;
+    }
+
+    let target = resolve_link_target(skill_dir)?;
+    let managed_dir = resolve_managed_link_dir(app_id);
+    if paths_match(&target, &managed_dir) || target == managed_dir {
+        return Some("managed".to_string());
+    }
+
+    if let Some(git_path) = config.git_path.as_ref().filter(|value| !value.trim().is_empty()) {
+        let sync_dir = PathBuf::from(git_path.trim());
+        if paths_match(&target, &sync_dir) || target == sync_dir {
+            return Some("legacy".to_string());
+        }
+    }
+
+    Some("legacy".to_string())
+}
+
+fn get_enabled_skill_count(app_id: &str, link_mode: Option<&str>, config: &AppConfig) -> usize {
+    let Some(git_path) = config.git_path.as_ref().filter(|value| !value.trim().is_empty()) else {
+        return 0;
+    };
+    let sync_dir = PathBuf::from(git_path.trim());
+    let Ok(entries) = list_sync_dir_entries(&sync_dir) else {
+        return 0;
+    };
+
+    match link_mode {
+        Some("managed") => get_saved_enabled_entries(app_id, config, &sync_dir)
+            .map(|value| value.len())
+            .unwrap_or(entries.len()),
+        Some("legacy") => entries.len(),
+        _ => 0,
+    }
+}
+
+fn get_linked_app_ids(config: &AppConfig) -> Vec<String> {
+    let mut app_ids = Vec::new();
+
+    for app in build_known_apps() {
+        let path = match resolve_skill_path(&app.id, config) {
+            Ok(path) => PathBuf::from(path),
+            Err(_) => continue,
+        };
+
+        if matches!(detect_link_mode(&path, &app.id, config).as_deref(), Some("managed")) {
+            app_ids.push(app.id.clone());
+        }
+    }
+
+    for app_id in config.custom_paths.keys() {
+        if app_ids.contains(app_id) {
+            continue;
+        }
+
+        let path = match resolve_skill_path(app_id, config) {
+            Ok(path) => PathBuf::from(path),
+            Err(_) => continue,
+        };
+
+        if matches!(detect_link_mode(&path, app_id, config).as_deref(), Some("managed")) {
+            app_ids.push(app_id.clone());
+        }
+    }
+
+    app_ids.sort();
+    app_ids.dedup();
+    app_ids
+}
+
+fn rebuild_managed_links_for_all_apps(config: &AppConfig) -> Result<(), String> {
+    let Some(git_path) = config.git_path.as_ref().filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+    let sync_dir = PathBuf::from(git_path.trim());
+    if !sync_dir.exists() {
+        return Ok(());
+    }
+
+    for app_id in get_linked_app_ids(config) {
+        let skill_path = resolve_skill_path(&app_id, config)?;
+        let skill_dir = PathBuf::from(&skill_path);
+        let backup_dir = get_backup_path(&skill_dir);
+        let enabled_entries = get_saved_enabled_entries(&app_id, config, &sync_dir)?;
+        let managed_dir = rebuild_managed_skill_dir(&app_id, &sync_dir, &enabled_entries)?;
+        ensure_app_points_to_managed_dir(&skill_dir, &backup_dir, &managed_dir)?;
+    }
+
     Ok(())
 }
 
@@ -1502,6 +1916,7 @@ fn scan_apps() -> Result<(Vec<SkillApp>, String), String> {
         let custom_path = config.custom_paths.get(&app.id).cloned();
         let path = resolve_skill_path(&app.id, &config)?;
         let (is_linked, backup_path) = check_link_status(&path);
+        let link_mode = detect_link_mode(Path::new(&path), &app.id, &config);
         let is_installed = custom_path
             .as_ref()
             .map(|value| PathBuf::from(value).exists())
@@ -1509,6 +1924,7 @@ fn scan_apps() -> Result<(Vec<SkillApp>, String), String> {
             || app.skill_paths.iter().any(|value| value.exists())
             || app.install_markers.iter().any(|value| value.exists())
             || backup_path.is_some();
+        let enabled_skill_count = get_enabled_skill_count(&app.id, link_mode.as_deref(), &config);
 
         apps.push(SkillApp {
             id: app.id.clone(),
@@ -1516,11 +1932,13 @@ fn scan_apps() -> Result<(Vec<SkillApp>, String), String> {
             path,
             icon: app.icon,
             skill_count: 0,
+            enabled_skill_count,
             is_linked,
             is_installed,
             is_custom: false,
             backup_path,
             custom_path,
+            link_mode,
         });
     }
 
@@ -1528,6 +1946,8 @@ fn scan_apps() -> Result<(Vec<SkillApp>, String), String> {
         if !apps.iter().any(|a| a.id == *id) {
             let is_installed = PathBuf::from(custom_path).exists();
             let (is_linked, backup_path) = check_link_status(custom_path);
+            let link_mode = detect_link_mode(Path::new(custom_path), id, &config);
+            let enabled_skill_count = get_enabled_skill_count(id, link_mode.as_deref(), &config);
 
             apps.push(SkillApp {
                 id: id.clone(),
@@ -1535,11 +1955,13 @@ fn scan_apps() -> Result<(Vec<SkillApp>, String), String> {
                 path: custom_path.clone(),
                 icon: "📁".to_string(),
                 skill_count: 0,
+                enabled_skill_count,
                 is_linked,
                 is_installed,
                 is_custom: true,
                 backup_path,
                 custom_path: Some(custom_path.clone()),
+                link_mode,
             });
         }
     }
@@ -1565,6 +1987,72 @@ fn scan_skills(app_id: String) -> Result<Vec<SkillFile>, String> {
     let config = load_config();
     let path = resolve_skill_path(&app_id, &config)?;
     collect_skill_entries(Path::new(&path))
+}
+
+#[tauri::command]
+fn get_app_enabled_skills(
+    app_id: String,
+    git_path: String,
+) -> Result<AppEnabledSkillsResponse, String> {
+    let mut config = load_config();
+    let sync_dir = PathBuf::from(git_path.trim());
+    if git_path.trim().is_empty() {
+        return Err("请先配置本地同步目录".to_string());
+    }
+
+    let mut skills = collect_sync_dir_skills(&sync_dir)?;
+    let skill_path = resolve_skill_path(&app_id, &config)?;
+    let link_mode = detect_link_mode(Path::new(&skill_path), &app_id, &config)
+        .unwrap_or_else(|| "managed".to_string());
+    let enabled_entries = get_saved_enabled_entries(&app_id, &config, &sync_dir)?;
+    let enabled_set: HashSet<String> = enabled_entries.iter().cloned().collect();
+
+    for skill in &mut skills {
+        skill.enabled = enabled_set.contains(&skill.entry_name);
+    }
+
+    let effective_enabled_skills = load_effective_enabled_skills(&config, &sync_dir)?;
+    if !effective_enabled_skills.contains_key(&app_id) {
+        save_enabled_entries_for_app(&mut config, &sync_dir, &app_id, enabled_entries.clone())?;
+    }
+
+    Ok(AppEnabledSkillsResponse {
+        app_id,
+        link_mode,
+        enabled_entries,
+        skills,
+    })
+}
+
+#[tauri::command]
+fn save_app_enabled_skills(
+    app_id: String,
+    git_path: String,
+    enabled_entries: Vec<String>,
+) -> Result<(), String> {
+    if git_path.trim().is_empty() {
+        return Err("请先配置本地同步目录".to_string());
+    }
+
+    let sync_dir = PathBuf::from(git_path.trim());
+    let mut config = load_config();
+    let skill_path = resolve_skill_path(&app_id, &config)?;
+    let skill_dir = PathBuf::from(&skill_path);
+    let backup_dir = get_backup_path(&skill_dir);
+    let available_entries = list_sync_dir_entries(&sync_dir)?;
+    let available_set: HashSet<String> = available_entries.iter().cloned().collect();
+
+    let mut sanitized_entries = Vec::new();
+    for value in enabled_entries {
+        let entry_name = sanitize_sync_entry_name(&value)?;
+        if available_set.contains(&entry_name) && !sanitized_entries.contains(&entry_name) {
+            sanitized_entries.push(entry_name);
+        }
+    }
+
+    let managed_dir = rebuild_managed_skill_dir(&app_id, &sync_dir, &sanitized_entries)?;
+    ensure_app_points_to_managed_dir(&skill_dir, &backup_dir, &managed_dir)?;
+    save_enabled_entries_for_app(&mut config, &sync_dir, &app_id, sanitized_entries)
 }
 
 #[tauri::command]
@@ -1606,6 +2094,13 @@ fn rename_skill(skill_path: String, new_name: String) -> Result<String, String> 
     }
 
     fs::rename(&source, &target).map_err(|e| e.to_string())?;
+    let config = load_config();
+    if let Some(git_path) = config.git_path.as_ref().filter(|value| !value.trim().is_empty()) {
+        let sync_dir = PathBuf::from(git_path.trim());
+        if target.starts_with(&sync_dir) || source.starts_with(&sync_dir) {
+            rebuild_managed_links_for_all_apps(&config)?;
+        }
+    }
     Ok(target.to_string_lossy().to_string())
 }
 
@@ -1618,16 +2113,38 @@ fn delete_skill(skill_path: String) -> Result<(), String> {
 
     let metadata = fs::symlink_metadata(&target).map_err(|e| e.to_string())?;
     if metadata.file_type().is_symlink() {
-        return fs::remove_file(&target)
+        let result = fs::remove_file(&target)
             .or_else(|_| fs::remove_dir(&target))
             .map_err(|e| e.to_string());
+        if result.is_ok() {
+            let config = load_config();
+            if let Some(git_path) = config.git_path.as_ref().filter(|value| !value.trim().is_empty()) {
+                let sync_dir = PathBuf::from(git_path.trim());
+                if target.starts_with(&sync_dir) {
+                    rebuild_managed_links_for_all_apps(&config)?;
+                }
+            }
+        }
+        return result;
     }
 
-    if metadata.is_dir() {
+    let result = if metadata.is_dir() {
         fs::remove_dir_all(&target).map_err(|e| e.to_string())
     } else {
         fs::remove_file(&target).map_err(|e| e.to_string())
+    };
+
+    if result.is_ok() {
+        let config = load_config();
+        if let Some(git_path) = config.git_path.as_ref().filter(|value| !value.trim().is_empty()) {
+            let sync_dir = PathBuf::from(git_path.trim());
+            if target.starts_with(&sync_dir) {
+                rebuild_managed_links_for_all_apps(&config)?;
+            }
+        }
     }
+
+    result
 }
 
 #[tauri::command]
@@ -1666,7 +2183,7 @@ fn sync_to_git(repo_path: String) -> Result<(), String> {
         fs::create_dir_all(&repo).map_err(|e| e.to_string())?;
     }
 
-    let _config = load_config();
+    let config = load_config();
     let apps = scan_apps().map_err(|e| e)?;
     let repo_real = repo.canonicalize().unwrap_or(repo.clone());
 
@@ -1678,14 +2195,18 @@ fn sync_to_git(repo_path: String) -> Result<(), String> {
     if let Ok(existing_entries) = fs::read_dir(&repo) {
         for entry in existing_entries.filter_map(Result::ok) {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name != ".git" && name != SYNC_MANIFEST_FILE {
+            if name != ".git" && name != SYNC_MANIFEST_FILE && name != SYNC_ENABLED_SKILLS_FILE {
                 used_names.insert(name);
             }
         }
     }
 
     for app in apps.0 {
-        if app.is_installed || app.is_linked {
+        if app.is_linked {
+            continue;
+        }
+
+        if app.is_installed {
             let skill_dir = PathBuf::from(&app.path);
             if skill_dir.exists() {
                 let skill_dir_real = skill_dir.canonicalize().unwrap_or(skill_dir.clone());
@@ -1747,6 +2268,9 @@ fn sync_to_git(repo_path: String) -> Result<(), String> {
     written_entries.sort();
     written_entries.dedup();
     save_sync_manifest(&repo, &written_entries)?;
+    let effective_enabled_skills = load_effective_enabled_skills(&config, &repo)?;
+    save_sync_enabled_skills(&repo, &effective_enabled_skills)?;
+    rebuild_managed_links_for_all_apps(&config)?;
 
     Ok(())
 }
@@ -1837,6 +2361,7 @@ fn git_pull(repo_path: String) -> Result<String, String> {
             let _ = run_git(&repo, &["branch", "-M", &branch]);
         }
 
+        rebuild_managed_links_for_all_apps(&app_config)?;
         return Ok("已将本地 skills 与远程仓库合并".to_string());
     }
     
@@ -1871,6 +2396,7 @@ fn git_pull(repo_path: String) -> Result<String, String> {
         return Err(format!("合并远程内容时发生冲突，请手动解决后重试: {}", e));
     }
 
+    rebuild_managed_links_for_all_apps(&app_config)?;
     Ok("已从远程仓库拉取最新内容".to_string())
 }
 
@@ -1921,12 +2447,13 @@ fn git_sync(repo_path: String) -> Result<String, String> {
         &repo,
         &["push", "-u", "origin", &branch],
     )?;
+    rebuild_managed_links_for_all_apps(&app_config)?;
     Ok("已完成拉取、同步并推送到远程仓库".to_string())
 }
 
 #[tauri::command]
 fn link_app(app_id: String, git_path: String) -> Result<String, String> {
-    let config = load_config();
+    let mut config = load_config();
     let skill_path = resolve_skill_path(&app_id, &config)?;
     let skill_dir = PathBuf::from(&skill_path);
     let backup_dir = get_backup_path(&skill_dir);
@@ -1937,7 +2464,9 @@ fn link_app(app_id: String, git_path: String) -> Result<String, String> {
         return Err("Local sync directory is required".to_string());
     }
 
-    if backup_dir.exists() {
+    let link_mode = detect_link_mode(&skill_dir, &app_id, &config);
+
+    if backup_dir.exists() && !matches!(link_mode.as_deref(), Some("legacy" | "managed")) {
         return Err(format!(
             "Backup already exists. Unlink first: {}",
             backup_dir.to_string_lossy()
@@ -1951,21 +2480,21 @@ fn link_app(app_id: String, git_path: String) -> Result<String, String> {
         ));
     }
 
-    if skill_dir.exists() {
+    let effective_enabled_skills = load_effective_enabled_skills(&config, &sync_dir)?;
+    let enabled_entries = if effective_enabled_skills.contains_key(&app_id) {
+        get_saved_enabled_entries(&app_id, &config, &sync_dir)?
+    } else {
+        let entries = list_sync_dir_entries(&sync_dir)?;
+        save_enabled_entries_for_app(&mut config, &sync_dir, &app_id, entries.clone())?;
+        entries
+    };
+
+    if skill_dir.exists() && !matches!(link_mode.as_deref(), Some("legacy" | "managed")) {
         fs::rename(&skill_dir, &backup_dir).map_err(|e| e.to_string())?;
     }
 
-    if let Some(parent) = skill_dir.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-
-    fs::create_dir_all(&sync_dir).map_err(|e| e.to_string())?;
-
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&sync_dir, &skill_dir).map_err(|e| e.to_string())?;
-
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&sync_dir, &skill_dir).map_err(|e| e.to_string())?;
+    let managed_dir = rebuild_managed_skill_dir(&app_id, &sync_dir, &enabled_entries)?;
+    ensure_app_points_to_managed_dir(&skill_dir, &backup_dir, &managed_dir)?;
 
     Ok(backup_path)
 }
@@ -1976,13 +2505,12 @@ fn unlink_app(app_id: String) -> Result<(), String> {
     let skill_path = resolve_skill_path(&app_id, &config)?;
     let skill_dir = PathBuf::from(&skill_path);
     let backup_dir = get_backup_path(&skill_dir);
+    let managed_dir = resolve_managed_link_dir(&app_id);
 
     if skill_dir.exists() {
         if let Ok(metadata) = fs::symlink_metadata(&skill_dir) {
             if metadata.file_type().is_symlink() {
-                fs::remove_file(&skill_dir)
-                    .or_else(|_| fs::remove_dir(&skill_dir))
-                    .map_err(|e| e.to_string())?;
+                remove_path_if_exists(&skill_dir)?;
             }
         }
     }
@@ -1990,6 +2518,8 @@ fn unlink_app(app_id: String) -> Result<(), String> {
     if backup_dir.exists() {
         fs::rename(&backup_dir, &skill_dir).map_err(|e| e.to_string())?;
     }
+
+    remove_path_if_exists(&managed_dir)?;
 
     Ok(())
 }
@@ -2003,7 +2533,8 @@ fn select_folder() -> Result<String, String> {
 fn save_git_path(path: String) -> Result<(), String> {
     let mut config = load_config();
     config.git_path = Some(path);
-    save_config(&config)
+    save_config(&config)?;
+    rebuild_managed_links_for_all_apps(&config)
 }
 
 fn normalize_version(value: &str) -> Option<Vec<u64>> {
@@ -2461,6 +2992,8 @@ fn main() {
             scan_apps,
             scan_skills,
             scan_git_path_skills,
+            get_app_enabled_skills,
+            save_app_enabled_skills,
             rename_skill,
             delete_skill,
             sync_to_git,

@@ -1,5 +1,6 @@
 import { Download, GitBranch, RefreshCw, Upload } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { useI18n } from '../lib/i18n-context'
 import type { GitSyncConfig } from '../types'
 
 type GitBusyAction = 'saveConfig' | 'push' | 'pull' | 'sync' | 'aggregate' | 'pickPath' | 'changePath' | null
@@ -15,6 +16,7 @@ interface GitPanelProps {
 }
 
 export function GitPanel({ gitPath, gitConfig, busyAction, onSaveConfig, onPush, onPull, onSync }: GitPanelProps) {
+  const { t } = useI18n()
   const [repoUrl, setRepoUrl] = useState(gitConfig.repoUrl)
   const [username, setUsername] = useState(gitConfig.username)
   const [branch, setBranch] = useState(gitConfig.branch)
@@ -34,24 +36,24 @@ export function GitPanel({ gitPath, gitConfig, busyAction, onSaveConfig, onPush,
   const syncBusy = busyAction === 'sync'
   const busyLabel =
     busyAction === 'saveConfig'
-      ? '正在保存配置...'
+      ? t('git.busy.saveConfig')
       : busyAction === 'push'
-        ? '正在推送到远程仓库...'
+        ? t('git.busy.push')
         : busyAction === 'pull'
-          ? '正在从远程仓库拉取...'
+          ? t('git.busy.pull')
           : busyAction === 'sync'
-            ? '正在同步...'
-            : '正在处理...'
+            ? t('git.busy.sync')
+            : t('git.busy.default')
 
   return (
     <section className="surface side-panel side-panel--git">
       <div className="side-panel__header">
         <div className="side-panel__title">
           <GitBranch size={26} />
-          <h3>Git 同步</h3>
+          <h3>{t('git.title')}</h3>
         </div>
         <span className={`badge ${configured ? 'badge--success' : 'badge--muted'} badge--compact`}>
-          {configured ? '已配置' : '未配置'}
+          {configured ? t('git.configured') : t('git.notConfigured')}
         </span>
       </div>
 
@@ -64,7 +66,7 @@ export function GitPanel({ gitPath, gitConfig, busyAction, onSaveConfig, onPush,
         ) : null}
 
         <div className="field-group">
-          <label htmlFor="git-path">仓库地址</label>
+          <label htmlFor="git-path">{t('git.repoUrl')}</label>
           <input
             id="git-path"
             value={repoUrl}
@@ -76,7 +78,7 @@ export function GitPanel({ gitPath, gitConfig, busyAction, onSaveConfig, onPush,
 
         <div className="git-panel__row">
           <div className="field-group">
-            <label htmlFor="git-username">用户名</label>
+            <label htmlFor="git-username">{t('git.username')}</label>
             <input
               id="git-username"
               value={username}
@@ -86,7 +88,7 @@ export function GitPanel({ gitPath, gitConfig, busyAction, onSaveConfig, onPush,
             />
           </div>
           <div className="field-group">
-            <label htmlFor="git-branch">分支</label>
+            <label htmlFor="git-branch">{t('git.branch')}</label>
             <input id="git-branch" value={branch} onChange={(event) => setBranch(event.target.value)} placeholder="main" disabled={gitBusy} />
           </div>
         </div>
@@ -100,29 +102,29 @@ export function GitPanel({ gitPath, gitConfig, busyAction, onSaveConfig, onPush,
           {saveBusy ? (
             <>
               <RefreshCw size={16} className="spin" />
-              保存中...
+              {t('git.saveConfigBusy')}
             </>
           ) : (
-            '保存配置'
+            t('git.saveConfig')
           )}
         </button>
 
         <div className="side-panel__divider" />
 
-        {!gitPath ? <p className="git-panel__hint">先选择本地同步目录，再执行推送、拉取或同步。</p> : null}
+        {!gitPath ? <p className="git-panel__hint">{t('git.selectDirectoryHint')}</p> : null}
 
         <div className="git-panel__actions">
           <button className="button button--primary git-action" type="button" onClick={onPush} disabled={gitBusy || !canRunGitActions}>
             {pushBusy ? <RefreshCw size={17} className="spin" /> : <Upload size={17} />}
-            {pushBusy ? '推送中' : '推送'}
+            {pushBusy ? t('git.pushBusy') : t('git.push')}
           </button>
           <button className="button button--card git-action" type="button" onClick={onPull} disabled={gitBusy || !canRunGitActions}>
             {pullBusy ? <RefreshCw size={17} className="spin" /> : <Download size={17} />}
-            {pullBusy ? '拉取中' : '拉取'}
+            {pullBusy ? t('git.pullBusy') : t('git.pull')}
           </button>
           <button className="button button--card git-action" type="button" onClick={onSync} disabled={gitBusy || !canRunGitActions}>
             <RefreshCw size={17} className={syncBusy ? 'spin' : ''} />
-            {syncBusy ? '同步中' : '同步'}
+            {syncBusy ? t('git.syncBusy') : t('git.sync')}
           </button>
         </div>
       </div>

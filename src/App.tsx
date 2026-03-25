@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
+import { useI18n } from './lib/i18n-context'
 import { initializeTheme } from './lib/theme'
 import DashboardPage from './pages/DashboardPage'
 import SettingsPage from './pages/SettingsPage'
@@ -10,6 +11,7 @@ const updateReminderDismissKey = 'skillbox.dismissedUpdateVersion'
 
 function AppShell() {
   const { notify, notifyAction } = useToast()
+  const { t } = useI18n()
   const remindedVersionRef = useRef<string | null>(null)
 
   useEffect(() => {
@@ -31,31 +33,31 @@ function AppShell() {
           }
 
           remindedVersionRef.current = result.latestVersion
-          notifyAction(`发现新版本 ${result.latestVersion}，可以立即下载并安装。`, {
+          notifyAction(t('app.updateAvailable', { version: result.latestVersion }), {
             durationMs: null,
             actions: [
               {
-                label: '立即更新',
+                label: t('app.updateNow'),
                 style: 'primary',
                 onClick: async () => {
-                  notify('正在下载更新安装包...', 'info')
+                  notify(t('app.downloadingInstaller'), 'info')
 
                   try {
                     const downloadResult = await downloadUpdate()
-                    notify(`更新安装包已下载：${downloadResult.fileName}`, 'success')
+                    notify(t('app.installerDownloaded', { fileName: downloadResult.fileName }), 'success')
 
                     try {
                       await openDownloadedUpdate(downloadResult.filePath)
                     } catch (error) {
-                      notify(`安装包已下载，但自动打开失败: ${String(error)}`, 'error')
+                      notify(t('app.installerOpenFailed', { error: String(error) }), 'error')
                     }
                   } catch (error) {
-                    notify(`下载更新失败: ${String(error)}`, 'error')
+                    notify(t('app.downloadFailed', { error: String(error) }), 'error')
                   }
                 },
               },
               {
-                label: '关闭提醒',
+                label: t('app.dismissReminder'),
                 onClick: () => {
                   window.localStorage.setItem(updateReminderDismissKey, result.latestVersion ?? '')
                 },
@@ -71,7 +73,7 @@ function AppShell() {
     return () => {
       window.clearTimeout(timerId)
     }
-  }, [notify, notifyAction])
+  }, [notify, notifyAction, t])
 
   return (
     <Routes>

@@ -205,13 +205,65 @@ a {
 
 .operation-banner {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 10px;
   min-height: 44px;
-  padding: 0 14px;
+  padding: 12px 14px;
   color: var(--text);
   font-size: 0.84rem;
   font-weight: 700;
+}
+
+.operation-banner__main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.operation-banner__progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 26px;
+}
+
+.operation-banner__progress-header,
+.operation-banner__progress-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.76rem;
+}
+
+.operation-banner__progress-header span,
+.operation-banner__progress-footer span {
+  color: var(--muted);
+}
+
+.operation-banner__progress-header strong {
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.operation-banner__progress-track {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--panel-muted) 82%, transparent);
+}
+
+.operation-banner__progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #111827 0%, #374151 100%);
+  transition: width 0.18s ease;
+}
+
+:root[data-theme='dark'] .operation-banner__progress-fill {
+  background: linear-gradient(90deg, #fafafa 0%, #a1a1aa 100%);
 }
 
 .dashboard-grid {

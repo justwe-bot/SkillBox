@@ -51,6 +51,18 @@ type LinkBusyState = {
   appName: string
 }
 
+type GitTransferPhase = 'receivingObjects' | 'resolvingDeltas' | 'filteringContent' | 'updatingFiles'
+
+type GitTransferProgress = {
+  phase: GitTransferPhase
+  percent: number
+  completed: number
+  total: number
+  transferred: string | null
+  speed: string | null
+  currentItem?: string | null
+}
+
 type DashboardSnapshot = {
   activeTab: TabKey
   apps: AppRecord[]
@@ -64,6 +76,8 @@ const SKILL_SCAN_BATCH_SIZE = 3
 const DASHBOARD_SNAPSHOT_KEY = 'skillbox.dashboard.snapshot'
 const GUIDE_STEP_COUNT = 5
 const GUIDE_HIGHLIGHT_DURATION_MS = 2200
+const MAX_GIT_LOG_LINES = 80
+const GIT_PROGRESS_LINE_REGEX = /^([^:]+):\s+(\d+)%\s+\((\d+)\/(\d+)\)(?:,\s+([^|,]+?)\s+\|\s+([^,]+?))?(?:,.*)?$/
 
 function loadDashboardSnapshot(): DashboardSnapshot | null {
   try {
@@ -129,6 +143,78 @@ function mapGitPathSkillsToRecords(files: BackendSkillFile[], language: string):
       fileCount: file.file_count,
     }))
     .sort((left, right) => left.name.localeCompare(right.name, language))
+}
+
+function normalizeGitTransferPhase(phase: string): GitTransferPhase | null {
+  switch (phase.trim().toLowerCase()) {
+    case 'receiving objects':
+      return 'receivingObjects'
+    case 'resolving deltas':
+      return 'resolvingDeltas'
+    case 'filtering content':
+      return 'filteringContent'
+    case 'updating files':
+      return 'updatingFiles'
+    default:
+      return null
+  }
+}
+
+function parseGitTransferProgress(line: string): GitTransferProgress | null {
+  const match = line.trim().match(GIT_PROGRESS_LINE_REGEX)
+  if (!match) {
+    return null
+  }
+
+  const [, phaseLabel, percentValue, completedValue, totalValue, transferredValue, speedValue] = match
+  const phase = normalizeGitTransferPhase(phaseLabel)
+  if (!phase) {
+    return null
+  }
+
+  return {
+    phase,
+    percent: Number(percentValue),
+    completed: Number(completedValue),
+    total: Number(totalValue),
+    transferred: transferredValue?.trim() ?? null,
+    speed: speedValue?.trim() ?? null,
+    currentItem: null,
+  }
+}
+
+function appendGitLogLine(current: string[], nextLine: string): string[] {
+  const normalizedLine = nextLine.trim()
+  if (!normalizedLine) {
+    return current
+  }
+
+  if (current[current.length - 1] === normalizedLine) {
+    return current
+  }
+
+  const nextProgress = parseGitTransferProgress(normalizedLine)
+  if (nextProgress) {
+    const previousLine = current[current.length - 1]
+    const previousProgress = previousLine ? parseGitTransferProgress(previousLine) : null
+    if (previousProgress && previousProgress.phase === nextProgress.phase) {
+      return [...current.slice(0, -1), normalizedLine]
+    }
+  }
+
+  const updated = [...current, normalizedLine]
+  return updated.length > MAX_GIT_LOG_LINES ? updated.slice(updated.length - MAX_GIT_LOG_LINES) : updated
+}
+
+function findLatestGitTransferProgress(lines: string[]): GitTransferProgress | null {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const progress = parseGitTransferProgress(lines[index])
+    if (progress) {
+      return progress
+    }
+  }
+
+  return null
 }
 
 export default function DashboardPage() {
@@ -547,6 +633,43 @@ export default function DashboardPage() {
 
     return null
   }, [gitBusyAction, linkBusyState, t])
+  const gitTransferProgress = useMemo(() => findLatestGitTransferProgress(gitLogs), [gitLogs])
+  const gitTransferPhaseLabel = useMemo(() => {
+    if (!gitTransferProgress) {
+      return null
+    }
+
+    switch (gitTransferProgress.phase) {
+      case 'receivingObjects':
+        return t('dashboard.gitProgress.receivingObjects')
+      case 'resolvingDeltas':
+        return t('dashboard.gitProgress.resolvingDeltas')
+      case 'filteringContent':
+        return t('dashboard.gitProgress.filteringContent')
+      case 'updatingFiles':
+        return t('dashboard.gitProgress.updatingFiles')
+      default:
+        return t('common.processing')
+    }
+  }, [gitTransferProgress, t])
+  const gitTransferMeta = useMemo(() => {
+    if (!gitTransferProgress) {
+      return null
+    }
+
+    const rightParts = [
+      gitTransferProgress.currentItem,
+      gitTransferProgress.transferred,
+      gitTransferProgress.speed ? t('dashboard.gitProgress.speed', { speed: gitTransferProgress.speed }) : null,
+    ]
+      .filter(Boolean)
+      .join('  |  ')
+
+    return {
+      left: `${gitTransferProgress.completed}/${gitTransferProgress.total}`,
+      right: rightParts || t('common.processing'),
+    }
+  }, [gitTransferProgress, t])
 
   function markOnboardingCompleted() {
     if (onboardingCompleted) {
@@ -833,7 +956,7 @@ export default function DashboardPage() {
     try {
       // 设置日志监听器
       unlisten = await listen<string>('git-log', (event) => {
-        setGitLogs(prev => [...prev, event.payload])
+        setGitLogs((prev) => appendGitLogLine(prev, event.payload))
       })
 
       const message = await gitPull(gitPath)
@@ -1104,6 +1227,21 @@ export default function DashboardPage() {
               <RefreshCw size={16} className="spin" />
               <span>{activeOperationLabel}</span>
             </div>
+            {gitTransferProgress && gitTransferPhaseLabel && gitTransferMeta ? (
+              <div className="operation-banner__progress">
+                <div className="operation-banner__progress-header">
+                  <span>{gitTransferPhaseLabel}</span>
+                  <strong>{gitTransferProgress.percent}%</strong>
+                </div>
+                <div className="operation-banner__progress-track" aria-hidden="true">
+                  <div className="operation-banner__progress-fill" style={{ width: `${gitTransferProgress.percent}%` }} />
+                </div>
+                <div className="operation-banner__progress-footer">
+                  <span>{gitTransferMeta.left}</span>
+                  <span>{gitTransferMeta.right}</span>
+                </div>
+              </div>
+            ) : null}
           </div>
         </section>
       ) : null}

@@ -12,13 +12,12 @@ use figma::{
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::io::BufReader;
-use std::io::BufRead;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use tauri::Manager;
 use tokio::fs as tokio_fs;
@@ -727,6 +726,10 @@ fn find_known_app(app_id: &str) -> Option<KnownApp> {
 }
 
 fn should_skip_walk_entry(entry: &DirEntry) -> bool {
+    if entry.depth() == 0 {
+        return true;
+    }
+
     let name = entry.file_name().to_string_lossy();
 
     // Skip all hidden directories/files (starting with .)
@@ -735,10 +738,7 @@ fn should_skip_walk_entry(entry: &DirEntry) -> bool {
     }
 
     // Always skip these directories (at any depth)
-    if matches!(
-        name.as_ref(),
-        "node_modules" | "target" | "__pycache__"
-    ) {
+    if matches!(name.as_ref(), "node_modules" | "target" | "__pycache__") {
         return false;
     }
 
@@ -1213,6 +1213,49 @@ fn remove_path_if_exists(path: &Path) -> Result<(), String> {
     } else {
         fs::remove_file(path).map_err(|e| e.to_string())
     }
+}
+
+fn should_skip_transfer_root_entry(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | ".DS_Store" | ".ckg" | ".mcp_gallery_cache" | INTERNAL_GIT_REPO_DIR
+    )
+}
+
+fn list_transfer_entries(root: &Path) -> Result<Vec<String>, String> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = Vec::new();
+
+    for entry in fs::read_dir(root).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        if should_skip_transfer_root_entry(&name)
+            || name == SYNC_MANIFEST_FILE
+            || name == SYNC_ENABLED_SKILLS_FILE
+        {
+            continue;
+        }
+
+        if path.is_file() {
+            if is_supported_instruction_file(&path) {
+                entries.push(name);
+            }
+            continue;
+        }
+
+        if !collect_skill_entries(&path)?.is_empty() {
+            entries.push(name);
+        }
+    }
+
+    entries.sort_by_key(|value| value.to_lowercase());
+    entries.dedup();
+    Ok(entries)
 }
 
 fn paths_match(left: &Path, right: &Path) -> bool {
@@ -1848,23 +1891,85 @@ fn run_git(repo_path: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-fn run_git_with_progress<F>(repo_path: &Path, args: &[&str], on_progress: F) -> Result<String, String>
+fn push_git_progress_line<F>(
+    buffer: &[u8],
+    on_progress: &Arc<F>,
+    log_lines: &Arc<Mutex<VecDeque<String>>>,
+    max_log_lines: usize,
+) where
+    F: Fn(&str) + Send + Sync + 'static,
+{
+    let line = String::from_utf8_lossy(buffer).trim().to_string();
+    if line.is_empty() {
+        return;
+    }
+
+    if let Ok(mut lines) = log_lines.lock() {
+        if lines.len() == max_log_lines {
+            lines.pop_front();
+        }
+        lines.push_back(line.clone());
+    }
+
+    on_progress(&line);
+}
+
+fn forward_git_progress_stream<R, F>(
+    reader: R,
+    on_progress: Arc<F>,
+    log_lines: Arc<Mutex<VecDeque<String>>>,
+    max_log_lines: usize,
+) where
+    R: Read,
+    F: Fn(&str) + Send + Sync + 'static,
+{
+    let mut reader = BufReader::new(reader);
+    let mut buffer = Vec::new();
+    let mut byte = [0_u8; 1];
+
+    loop {
+        match reader.read(&mut byte) {
+            Ok(0) => {
+                if !buffer.is_empty() {
+                    push_git_progress_line(&buffer, &on_progress, &log_lines, max_log_lines);
+                }
+                break;
+            }
+            Ok(_) => match byte[0] {
+                b'\n' | b'\r' => {
+                    if !buffer.is_empty() {
+                        push_git_progress_line(&buffer, &on_progress, &log_lines, max_log_lines);
+                        buffer.clear();
+                    }
+                }
+                value => buffer.push(value),
+            },
+            Err(_) => break,
+        }
+    }
+}
+
+fn run_git_with_progress<F>(
+    repo_path: &Path,
+    args: &[&str],
+    on_progress: F,
+) -> Result<String, String>
 where
     F: Fn(&str) + Send + Sync + 'static,
 {
-    // Add --progress flag for fetch operations to show progress
-    let mut full_args: Vec<&str> = args.to_vec();
-    if args.get(0) == Some(&"fetch") {
-        full_args.insert(1, "--progress");
-    }
+    const MAX_LOG_LINES: usize = 12;
 
     let mut cmd = Command::new("git");
-    cmd.args(&full_args)
+    cmd.args(args)
         .current_dir(repo_path)
+        .env("GIT_FLUSH", "1")
+        .env("GIT_PROGRESS_DELAY", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn git {}: {}", full_args.join(" "), e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn git {}: {}", args.join(" "), e))?;
 
     let stdout = child.stdout.take().expect("stdout pipe");
     let stderr = child.stderr.take().expect("stderr pipe");
@@ -1872,23 +1977,16 @@ where
     let on_progress = Arc::new(on_progress);
     let stdout_callback = Arc::clone(&on_progress);
     let stderr_callback = Arc::clone(&on_progress);
+    let log_lines = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_LOG_LINES)));
+    let stdout_lines = Arc::clone(&log_lines);
+    let stderr_lines = Arc::clone(&log_lines);
 
     let stdout_thread = thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().flatten() {
-            if !line.is_empty() {
-                stdout_callback(&line);
-            }
-        }
+        forward_git_progress_stream(stdout, stdout_callback, stdout_lines, MAX_LOG_LINES);
     });
 
     let stderr_thread = thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        for line in reader.lines().flatten() {
-            if !line.is_empty() {
-                stderr_callback(&line);
-            }
-        }
+        forward_git_progress_stream(stderr, stderr_callback, stderr_lines, MAX_LOG_LINES);
     });
 
     let _ = stdout_thread.join();
@@ -1899,7 +1997,29 @@ where
     if status.success() {
         Ok(String::new())
     } else {
-        Err(format!("git {} failed with exit code: {:?}", full_args.join(" "), status.code()))
+        let details = log_lines
+            .lock()
+            .ok()
+            .map(|lines| {
+                lines
+                    .iter()
+                    .filter(|line| !line.trim().is_empty())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+
+        Err(format!(
+            "git {} failed with exit code: {:?}{}",
+            args.join(" "),
+            status.code(),
+            if details.is_empty() {
+                String::new()
+            } else {
+                format!("\n{}", details)
+            }
+        ))
     }
 }
 
@@ -1983,11 +2103,11 @@ fn sync_skill_workspace(
     fs::create_dir_all(source_root).map_err(|e| e.to_string())?;
     fs::create_dir_all(target_root).map_err(|e| e.to_string())?;
 
-    let source_entries = list_sync_dir_entries(source_root)?;
+    let source_entries = list_transfer_entries(source_root)?;
     let source_entry_set: HashSet<String> = source_entries.iter().cloned().collect();
 
     if remove_missing_entries {
-        for target_entry in list_sync_dir_entries(target_root)? {
+        for target_entry in list_transfer_entries(target_root)? {
             if source_entry_set.contains(&target_entry) {
                 continue;
             }
@@ -2005,16 +2125,7 @@ fn sync_skill_workspace(
         copy_path_recursive(&source, &target)?;
     }
 
-    if remove_missing_entries {
-        save_sync_manifest(target_root, &source_entries)?;
-    }
-
-    sync_metadata_file(
-        source_root,
-        target_root,
-        SYNC_MANIFEST_FILE,
-        remove_missing_entries,
-    )?;
+    save_sync_manifest(target_root, &source_entries)?;
     sync_metadata_file(
         source_root,
         target_root,
@@ -2108,77 +2219,136 @@ fn make_flat_skill_name(
     }
 }
 
-fn is_directory_empty(path: &Path) -> Result<bool, String> {
-    Ok(fs::read_dir(path)
-        .map_err(|e| e.to_string())?
-        .next()
-        .transpose()
-        .map_err(|e| e.to_string())?
-        .is_none())
+fn normalized_git_branch(git_config: &GitSyncConfig) -> String {
+    let branch = git_config.branch.trim();
+    if branch.is_empty() {
+        default_git_branch()
+    } else {
+        branch.to_string()
+    }
 }
 
-fn ensure_repo_initialized(repo_path: &Path, git_config: &GitSyncConfig) -> Result<(), String> {
-    if !repo_path.exists() {
-        fs::create_dir_all(repo_path).map_err(|e| e.to_string())?;
+fn with_fresh_internal_git_repo<T, F>(sync_dir: &Path, operation: F) -> Result<T, String>
+where
+    F: FnOnce(&Path) -> Result<T, String>,
+{
+    fs::create_dir_all(sync_dir).map_err(|e| e.to_string())?;
+
+    let repo = resolve_internal_git_repo_dir(sync_dir);
+    remove_path_if_exists(&repo)?;
+
+    let result = operation(&repo);
+    let cleanup_result = remove_path_if_exists(&repo);
+
+    match (result, cleanup_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(cleanup_error)) => Err(format!("清理临时同步仓库失败: {}", cleanup_error)),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(format!(
+            "{}\n临时同步仓库清理也失败了: {}",
+            error, cleanup_error
+        )),
     }
+}
 
-    let git_dir = repo_path.join(".git");
-    if !git_dir.exists() {
-        let repo_url = git_config.repo_url.trim();
-        let branch = git_config.branch.trim();
+fn initialize_temp_push_repo(repo_path: &Path, git_config: &GitSyncConfig) -> Result<(), String> {
+    fs::create_dir_all(repo_path).map_err(|e| e.to_string())?;
+    run_git(repo_path, &["init"])?;
+    run_git(
+        repo_path,
+        &["remote", "add", "origin", git_config.repo_url.trim()],
+    )?;
+    Ok(())
+}
 
-        if !repo_url.is_empty() && is_directory_empty(repo_path)? {
-            let parent = repo_path
-                .parent()
-                .ok_or_else(|| "Unable to resolve repository parent directory".to_string())?;
-            let repo_name = repo_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| "Unable to resolve repository directory name".to_string())?;
+fn clone_remote_snapshot(
+    repo_path: &Path,
+    git_config: &GitSyncConfig,
+    app_handle: Option<&tauri::AppHandle>,
+) -> Result<(), String> {
+    let parent = repo_path
+        .parent()
+        .ok_or_else(|| "Unable to resolve repository parent directory".to_string())?;
+    let repo_name = repo_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Unable to resolve repository directory name".to_string())?;
 
-            let mut clone_args = vec!["clone"];
-            if !branch.is_empty() {
-                clone_args.push("--branch");
-                clone_args.push(branch);
-            }
-            clone_args.push(repo_url);
-            clone_args.push(repo_name);
-
-            if let Err(error) = run_git(parent, &clone_args) {
-                let missing_branch = error.contains("Remote branch") && error.contains("not found");
-
-                if missing_branch {
-                    run_git(parent, &["clone", repo_url, repo_name])?;
-                } else {
-                    return Err(error);
-                }
-            }
-        } else {
-            // Just run git init, don't specify branch - it will use default
-            run_git(repo_path, &["init"])?;
-        }
-    }
-
-    if !repo_path.join(".git").exists() {
-        return Err("Local sync directory is not a git repository".to_string());
-    }
-
-    if !git_config.repo_url.trim().is_empty() {
-        let remote_exists = run_git(repo_path, &["remote", "get-url", "origin"]).is_ok();
-        if remote_exists {
-            run_git(
-                repo_path,
-                &["remote", "set-url", "origin", git_config.repo_url.trim()],
-            )?;
-        } else {
-            run_git(
-                repo_path,
-                &["remote", "add", "origin", git_config.repo_url.trim()],
-            )?;
-        }
-    }
+    let branch = normalized_git_branch(git_config);
+    let progress_handle = app_handle.cloned();
+    run_git_with_progress(
+        parent,
+        &[
+            "clone",
+            "--progress",
+            "--depth",
+            "1",
+            "--branch",
+            &branch,
+            "--single-branch",
+            git_config.repo_url.trim(),
+            repo_name,
+        ],
+        move |line| {
+            emit_git_log(progress_handle.as_ref(), line);
+        },
+    )?;
 
     Ok(())
+}
+
+fn emit_git_log(app_handle: Option<&tauri::AppHandle>, message: &str) {
+    if let Some(handle) = app_handle {
+        let _ = handle.emit_all("git-log", message.to_string());
+    }
+}
+
+fn pull_remote_snapshot_into_sync_dir(
+    sync_dir: &Path,
+    app_config: &AppConfig,
+    app_handle: Option<&tauri::AppHandle>,
+    rebuild_links: bool,
+) -> Result<String, String> {
+    emit_git_log(app_handle, "准备临时同步仓库...");
+
+    let result = with_fresh_internal_git_repo(sync_dir, |repo| {
+        emit_git_log(app_handle, "克隆远程仓库...");
+        clone_remote_snapshot(repo, &app_config.git_config, app_handle)?;
+
+        emit_git_log(app_handle, "同步工作区...");
+        sync_skill_workspace(repo, sync_dir, true)?;
+
+        if rebuild_links {
+            emit_git_log(app_handle, "重建应用链接...");
+            rebuild_managed_links_for_all_apps(app_config)?;
+        }
+
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => {
+            emit_git_log(app_handle, "✓ 完成！");
+            Ok("已从远程仓库拉取并更新本地同步目录".to_string())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn push_sync_dir_snapshot(sync_dir: &Path, app_config: &AppConfig) -> Result<(), String> {
+    with_fresh_internal_git_repo(sync_dir, |repo| {
+        initialize_temp_push_repo(repo, &app_config.git_config)?;
+        sync_skill_workspace(sync_dir, repo, true)?;
+
+        if !commit_repo_changes(repo)? {
+            run_git(repo, &["commit", "--allow-empty", "-m", "Sync AI skills"])?;
+        }
+
+        let branch = normalized_git_branch(&app_config.git_config);
+        let refspec = format!("HEAD:{}", branch);
+        run_git(repo, &["push", "--force", "-u", "origin", &refspec])?;
+        Ok(())
+    })
 }
 
 fn commit_repo_changes(repo_path: &Path) -> Result<bool, String> {
@@ -2197,53 +2367,28 @@ fn commit_repo_changes(repo_path: &Path) -> Result<bool, String> {
     // Try normal commit first
     match run_git(repo_path, &["commit", "-m", "Sync AI skills"]) {
         Ok(_) => return Ok(true),
-        Err(e) if e.contains("cannot lock ref") || e.contains("reference already exists") || e.contains("unable to resolve HEAD") => {
+        Err(e)
+            if e.contains("cannot lock ref")
+                || e.contains("reference already exists")
+                || e.contains("unable to resolve HEAD") =>
+        {
             // Git repo is corrupted. Re-initialize it.
             let git_dir = repo_path.join(".git");
-            
+
             // Remove the entire .git directory
             let _ = fs::remove_dir_all(&git_dir);
-            
+
             // Re-initialize git repo
             run_git(repo_path, &["init"])?;
-            
+
             // Re-add all files and commit
             run_git(repo_path, &["add", "."])?;
             run_git(repo_path, &["commit", "-m", "Sync AI skills"])?;
-            
+
             Ok(true)
         }
         Err(e) => Err(e),
     }
-}
-
-fn repo_has_local_changes(repo_path: &Path) -> Result<bool, String> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to run git status --porcelain: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "git status --porcelain failed".to_string()
-        } else {
-            format!("git status --porcelain failed: {}", stderr)
-        });
-    }
-
-    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
-}
-
-fn repo_has_any_commit(repo_path: &Path) -> Result<bool, String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to run git rev-parse HEAD: {}", e))?;
-
-    Ok(output.status.success())
 }
 
 fn check_link_status(path: &str) -> (bool, Option<String>) {
@@ -2905,25 +3050,7 @@ async fn git_push(repo_path: String) -> Result<(), String> {
 
         let sync_dir = PathBuf::from(&repo_path);
         fs::create_dir_all(&sync_dir).map_err(|e| e.to_string())?;
-        let repo = resolve_internal_git_repo_dir(&sync_dir);
-        ensure_repo_initialized(&repo, &app_config.git_config)?;
-        sync_skill_workspace(&sync_dir, &repo, true)?;
-        let _ = commit_repo_changes(&repo)?;
-        
-        // Check push permission before actual push
-        let branch = app_config.git_config.branch.trim();
-        if let Err(e) = run_git(&repo, &["ls-remote", "--exit-code", "origin", branch]) {
-            return Err(format!(
-                "无法推送到远程仓库，请检查：\n\
-                1. 是否有该仓库的写权限\n\
-                2. 远程分支 '{}' 是否存在\n\
-                3. 网络连接是否正常\n\n错误详情: {}",
-                branch, e
-            ));
-        }
-        
-        run_git(&repo, &["push", "-u", "origin", branch])?;
-        Ok(())
+        push_sync_dir_snapshot(&sync_dir, &app_config)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2939,104 +3066,7 @@ async fn git_pull(repo_path: String, app_handle: tauri::AppHandle) -> Result<Str
 
         let sync_dir = PathBuf::from(&repo_path);
         fs::create_dir_all(&sync_dir).map_err(|e| e.to_string())?;
-        let repo = resolve_internal_git_repo_dir(&sync_dir);
-        ensure_repo_initialized(&repo, &app_config.git_config)?;
-        
-        let _ = app_handle.emit_all("git-log", "初始化完成，开始同步工作区...");
-        sync_skill_workspace(&sync_dir, &repo, false)?;
-
-        let has_commit = repo_has_any_commit(&repo)?;
-
-        if !has_commit {
-            let branch = app_config.git_config.branch.trim().to_string();
-
-            // Commit whatever local skills already exist so they are preserved.
-            let _ = app_handle.emit_all("git-log", "提交本地技能文件...");
-            run_git(&repo, &["add", "."])?;
-            let _ = commit_repo_changes(&repo)?;
-            // Re-ensure remote is configured in case repo was re-initialized
-            ensure_repo_initialized(&repo, &app_config.git_config)?;
-
-            // Fetch remote content.
-            let _ = app_handle.emit_all("git-log", format!("正在从远程获取 '{}' 分支...", branch));
-            let handle = app_handle.clone();
-            run_git_with_progress(&repo, &["fetch", "origin", &branch], move |line| {
-                // Only emit significant progress lines, not every percentage update
-                if line.contains("done.") || line.contains("error") || line.contains("fatal") {
-                    let _ = handle.emit_all("git-log", line.to_string());
-                }
-            })?;
-            let _ = app_handle.emit_all("git-log", "获取远程数据完成");
-
-            let fetch_head = repo.join(".git/FETCH_HEAD");
-            if fetch_head.exists() {
-                let _ = app_handle.emit_all("git-log", "合并远程历史...");
-                let merge_result = run_git(
-                    &repo,
-                    &[
-                        "merge",
-                        "--allow-unrelated-histories",
-                        "--no-edit",
-                        "FETCH_HEAD",
-                    ],
-                );
-
-                if let Err(e) = merge_result {
-                    return Err(format!("合并远程内容时发生冲突，请手动解决后重试: {}", e));
-                }
-                
-                let _ = app_handle.emit_all("git-log", "合并完成");
-                let _ = run_git(&repo, &["branch", "-M", &branch]);
-            }
-
-            let _ = app_handle.emit_all("git-log", "同步工作区...");
-            sync_skill_workspace(&repo, &sync_dir, true)?;
-            let _ = app_handle.emit_all("git-log", "重建应用链接...");
-            rebuild_managed_links_for_all_apps(&app_config)?;
-            let _ = app_handle.emit_all("git-log", "✓ 完成！");
-            return Ok("已将本地 skills 与远程仓库合并".to_string());
-        }
-
-        let branch = app_config.git_config.branch.trim().to_string();
-
-        let had_local_changes = repo_has_local_changes(&repo)?;
-        if had_local_changes {
-            let _ = app_handle.emit_all("git-log", "提交本地更改...");
-            run_git(&repo, &["add", "."])?;
-            let _ = commit_repo_changes(&repo)?;
-            // Re-ensure remote is configured in case repo was re-initialized
-            ensure_repo_initialized(&repo, &app_config.git_config)?;
-        }
-
-        let _ = app_handle.emit_all("git-log", format!("正在从远程获取 '{}' 分支...", branch));
-        let handle = app_handle.clone();
-        run_git_with_progress(&repo, &["fetch", "origin", &branch], move |line| {
-            let _ = handle.emit_all("git-log", line.to_string());
-        })?;
-
-        let _ = app_handle.emit_all("git-log", "合并远程更改...");
-        let merge_result = run_git(
-            &repo,
-            &[
-                "merge",
-                "--allow-unrelated-histories",
-                "--no-edit",
-                &format!("origin/{}", branch),
-            ],
-        );
-
-        if let Err(e) = merge_result {
-            return Err(format!("合并远程内容时发生冲突，请手动解决后重试: {}", e));
-        }
-        
-        let _ = app_handle.emit_all("git-log", "合并完成");
-
-        let _ = app_handle.emit_all("git-log", "同步工作区...");
-        sync_skill_workspace(&repo, &sync_dir, true)?;
-        let _ = app_handle.emit_all("git-log", "重建应用链接...");
-        rebuild_managed_links_for_all_apps(&app_config)?;
-        let _ = app_handle.emit_all("git-log", "✓ 完成！");
-        Ok("已从远程仓库拉取最新内容".to_string())
+        pull_remote_snapshot_into_sync_dir(&sync_dir, &app_config, Some(&app_handle), true)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -3052,58 +3082,10 @@ async fn git_sync(repo_path: String) -> Result<String, String> {
 
         let sync_dir = PathBuf::from(&repo_path);
         fs::create_dir_all(&sync_dir).map_err(|e| e.to_string())?;
-        let repo = resolve_internal_git_repo_dir(&sync_dir);
-        ensure_repo_initialized(&repo, &app_config.git_config)?;
-        sync_skill_workspace(&sync_dir, &repo, false)?;
-
-        let branch = app_config.git_config.branch.trim().to_string();
-        let has_commit = repo_has_any_commit(&repo)?;
-
-        if !has_commit {
-            // No local commits yet — commit existing files first, then merge remote.
-            run_git(&repo, &["add", "."])?;
-            let _ = commit_repo_changes(&repo)?;
-
-            run_git(&repo, &["fetch", "origin", &branch])?;
-
-            let fetch_head = repo.join(".git/FETCH_HEAD");
-            if fetch_head.exists() {
-                let _ = run_git(
-                    &repo,
-                    &[
-                        "merge",
-                        "--allow-unrelated-histories",
-                        "--no-edit",
-                        "FETCH_HEAD",
-                    ],
-                );
-                let _ = run_git(&repo, &["branch", "-M", &branch]);
-            }
-        } else {
-            // Commit any local changes before fetching so stash is never needed.
-            if repo_has_local_changes(&repo)? {
-                run_git(&repo, &["add", "."])?;
-                let _ = commit_repo_changes(&repo)?;
-            }
-            run_git(&repo, &["fetch", "origin", &branch])?;
-            let _ = run_git(
-                &repo,
-                &[
-                    "merge",
-                    "--allow-unrelated-histories",
-                    "--no-edit",
-                    &format!("origin/{}", branch),
-                ],
-            );
-        }
-
-        sync_skill_workspace(&repo, &sync_dir, true)?;
+        pull_remote_snapshot_into_sync_dir(&sync_dir, &app_config, None, false)?;
         sync_to_git_internal(&repo_path)?;
-        sync_skill_workspace(&sync_dir, &repo, true)?;
-        let _ = commit_repo_changes(&repo)?;
-        run_git(&repo, &["push", "-u", "origin", &branch])?;
-        rebuild_managed_links_for_all_apps(&app_config)?;
-        Ok("已完成拉取、同步并推送到远程仓库".to_string())
+        push_sync_dir_snapshot(&sync_dir, &app_config)?;
+        Ok("已完成拉取、汇总并强制推送到远程仓库".to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -3459,7 +3441,7 @@ async fn download_update(window: tauri::Window) -> Result<DownloadUpdateResult, 
 
     let target_path = download_dir.join(&asset.name);
     emit_update_download_progress(&window, &asset.name, 0, None, "preparing");
-    
+
     // Check if the existing file matches the expected asset
     if target_path.exists() {
         // Verify the file name contains the latest version to ensure it's not a cached old version

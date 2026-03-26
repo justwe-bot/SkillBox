@@ -59,6 +59,11 @@ const zhCN = {
   'dashboard.activeOperation.saveConfig': '正在保存 Git 配置...',
   'dashboard.activeOperation.pickPath': '正在选择本地同步目录...',
   'dashboard.activeOperation.changePath': '正在切换本地同步目录...',
+  'dashboard.gitProgress.receivingObjects': '正在下载 Git 对象',
+  'dashboard.gitProgress.resolvingDeltas': '正在处理差异数据',
+  'dashboard.gitProgress.filteringContent': '正在拉取文件内容',
+  'dashboard.gitProgress.updatingFiles': '正在写入本地文件',
+  'dashboard.gitProgress.speed': '速度 {speed}',
   'dashboard.openSettings': '设置',
   'dashboard.stats.detectedApps': '检测到的应用',
   'dashboard.stats.skillFiles': '技能文件总数',
@@ -390,6 +395,11 @@ const enUS: TranslationDictionary = {
   'dashboard.activeOperation.saveConfig': 'Saving Git configuration...',
   'dashboard.activeOperation.pickPath': 'Selecting a local sync directory...',
   'dashboard.activeOperation.changePath': 'Switching the local sync directory...',
+  'dashboard.gitProgress.receivingObjects': 'Downloading Git objects',
+  'dashboard.gitProgress.resolvingDeltas': 'Resolving deltas',
+  'dashboard.gitProgress.filteringContent': 'Fetching file contents',
+  'dashboard.gitProgress.updatingFiles': 'Writing local files',
+  'dashboard.gitProgress.speed': 'Speed {speed}',
   'dashboard.openSettings': 'Settings',
   'dashboard.stats.detectedApps': 'Detected apps',
   'dashboard.stats.skillFiles': 'Skill files',
@@ -742,8 +752,12 @@ export function localizeBackendSuccessMessage(message: string, language: AppLang
   switch (message) {
     case '已从远程仓库拉取最新内容':
       return language === 'en-US' ? 'Pulled the latest content from the remote repository' : message
+    case '已从远程仓库拉取并更新本地同步目录':
+      return language === 'en-US' ? 'Pulled the remote repository and refreshed the local sync directory' : message
     case '已完成拉取、同步并推送到远程仓库':
       return language === 'en-US' ? 'Pulled, synced, and pushed to the remote repository' : message
+    case '已完成拉取、汇总并强制推送到远程仓库':
+      return language === 'en-US' ? 'Pulled, aggregated, and force-pushed to the remote repository' : message
     case '已将本地 skills 与远程仓库合并':
       return language === 'en-US' ? 'Merged local skills with the remote repository' : message
     default:

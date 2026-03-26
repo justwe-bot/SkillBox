@@ -11,6 +11,9 @@ import {
 type ToastTone = 'success' | 'error' | 'info'
 type ToastActionStyle = 'primary' | 'ghost' | 'danger'
 
+const DEFAULT_TOAST_DURATION_MS = 3200
+const ERROR_TOAST_DURATION_MS = 6500
+
 interface ToastAction {
   label: string
   style?: ToastActionStyle
@@ -53,7 +56,12 @@ export function ToastProvider({ children }: PropsWithChildren) {
       const id = Date.now() + Math.floor(Math.random() * 1000)
       setToasts((current) => [...current, { id, tone, message, actions: options?.actions }])
 
-      const durationMs = options?.durationMs === undefined ? 3200 : options.durationMs
+      const durationMs =
+        options?.durationMs === undefined
+          ? tone === 'error'
+            ? ERROR_TOAST_DURATION_MS
+            : DEFAULT_TOAST_DURATION_MS
+          : options.durationMs
       if (durationMs !== null) {
         const timeoutId = window.setTimeout(() => {
           dismissToast(id)

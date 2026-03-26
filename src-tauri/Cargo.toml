@@ -1,6 +1,6 @@
 [package]
 name = "skillbox"
-version = "2026.3.264"
+version = "2026.3.265"
 description = "A cross-platform skill management tool"
 authors = ["SkillBox"]
 license = "MIT"

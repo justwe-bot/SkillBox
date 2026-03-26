@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { Link } from 'react-router-dom'
 import { open as openDialog } from '@tauri-apps/api/dialog'
+import { listen } from '@tauri-apps/api/event'
 import { Archive, BookOpen, FolderOpen, FolderPlus, RefreshCw, Scan, Search, Settings } from 'lucide-react'
 import { ApplicationCard } from '../components/ApplicationCard'
 import { FigmaSkillIcon } from '../components/FigmaSkillIcon'
@@ -147,6 +148,7 @@ export default function DashboardPage() {
   const [busyAppId, setBusyAppId] = useState<string | null>(null)
   const [linkBusyState, setLinkBusyState] = useState<LinkBusyState | null>(null)
   const [gitBusyAction, setGitBusyAction] = useState<GitBusyAction>(null)
+  const [gitLogs, setGitLogs] = useState<string[]>([])
   const [search, setSearch] = useState(() => cachedSnapshotRef.current?.search ?? '')
   const [customModalOpen, setCustomModalOpen] = useState(false)
   const [editModalOpen, setEditModalOpen] = useState(false)
@@ -804,15 +806,27 @@ export default function DashboardPage() {
     }
 
     flushSync(() => setGitBusyAction('pull'))
+    flushSync(() => setGitLogs([]))
     await waitForBusyOverlayPaint()
+
+    let unlisten: (() => void) | null = null
     try {
+      // 设置日志监听器
+      unlisten = await listen<string>('git-log', (event) => {
+        setGitLogs(prev => [...prev, event.payload])
+      })
+
       const message = await gitPull(gitPath)
       await refreshData()
       notify(localizeBackendSuccessMessage(message, language), 'success')
     } catch (error) {
       notify(t('dashboard.notifications.pullFailed', { error: String(error) }), 'error')
     } finally {
+      if (unlisten) {
+        unlisten()
+      }
       setGitBusyAction(null)
+      setGitLogs([])
     }
   }
 
@@ -1066,8 +1080,10 @@ export default function DashboardPage() {
       {activeOperationLabel ? (
         <section className="operation-strip">
           <div className="surface operation-banner" aria-live="polite" aria-busy="true">
-            <RefreshCw size={16} className="spin" />
-            <span>{activeOperationLabel}</span>
+            <div className="operation-banner__main">
+              <RefreshCw size={16} className="spin" />
+              <span>{activeOperationLabel}</span>
+            </div>
           </div>
         </section>
       ) : null}
@@ -1166,18 +1182,13 @@ export default function DashboardPage() {
           )}
         </section>
 
-        <aside className={`side-column ${gitBusy ? 'side-column--busy' : ''}`}>
-          {gitBusy ? (
-            <div className="side-column__overlay" aria-live="polite" aria-busy="true">
-              <RefreshCw size={20} className="spin" />
-              <span>{activeOperationLabel ?? t('git.busy.default')}</span>
-            </div>
-          ) : null}
+        <aside className="side-column">
           <div ref={gitPanelRef} className={`guide-anchor ${highlightedArea === 'git' ? 'guide-focus' : ''}`}>
             <GitPanel
               gitPath={gitPath}
               gitConfig={gitConfig}
               busyAction={gitBusyAction}
+              logs={gitLogs}
               pushTitle={gitActionCopy.push.description}
               pullTitle={gitActionCopy.pull.description}
               syncTitle={gitActionCopy.sync.description}
@@ -1226,6 +1237,19 @@ export default function DashboardPage() {
                   {gitBusyAction === 'aggregate' ? t('dashboard.side.aggregateLoading') : t('dashboard.side.aggregate')}
                 </button>
               </div>
+              {gitBusy && gitLogs.length > 0 && (
+                <div className="git-logs-box">
+                  <div className="git-logs-box__header">
+                    <RefreshCw size={14} className="spin" />
+                    <span>操作日志</span>
+                  </div>
+                  <div className="git-logs-box__content">
+                    {gitLogs.map((log, index) => (
+                      <div key={index} className="git-logs-box__line">{log}</div>
+                    ))}
+                  </div>
+                </div>
+              )}
               </>
             ) : null}
             {!gitPath ? (

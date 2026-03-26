@@ -4,6 +4,20 @@ import { useI18n } from '../lib/i18n-context'
 import { AnimatedNumber } from './AnimatedNumber'
 import { AppBrandIcon } from './AppBrandIcon'
 
+function hideHomePath(path: string): string {
+  // 匹配 macOS/Linux 的用户目录 /Users/username/
+  const userMatch = path.match(/^\/Users\/[^\/]+/)
+  if (userMatch) {
+    return path.replace(userMatch[0], '~')
+  }
+  // 匹配 Windows 的用户目录 C:\Users\username\
+  const winMatch = path.match(/^[A-Z]:\\Users\\[^\\]+/)
+  if (winMatch) {
+    return path.replace(winMatch[0], '~')
+  }
+  return path
+}
+
 interface ApplicationCardProps {
   app: AppRecord
   totalSkillCount: number
@@ -49,7 +63,7 @@ export function ApplicationCard({
           </div>
           <div className="card-app__text">
             <h3 className="card-app__title">{app.name}</h3>
-            <p className="card-app__path ellipsis">{app.path}</p>
+            <p className="card-app__path ellipsis">{hideHomePath(app.path)}</p>
           </div>
         </div>
         <div className="card-app__header-tools">

@@ -193,13 +193,14 @@ a {
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  padding-top: 12px;
-  padding-bottom: 12px;
+  gap: 16px;
+  padding-top: 16px;
+  padding-bottom: 16px;
 }
 
 .operation-strip {
-  padding-bottom: 4px;
+  padding-top: 8px;
+  padding-bottom: 8px;
 }
 
 .operation-banner {
@@ -216,9 +217,10 @@ a {
 .dashboard-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.95fr) 320px;
-  gap: 12px;
+  gap: 16px;
   align-items: start;
-  padding-bottom: 14px;
+  padding-top: 8px;
+  padding-bottom: 24px;
 }
 
 .settings-grid {
@@ -250,7 +252,7 @@ a {
 .stack {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 16px;
 }
 
 .side-column {
@@ -1222,6 +1224,26 @@ a {
 
 .side-panel--git {
   padding: 16px;
+  position: relative;
+}
+
+.git-panel__overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--panel-raised) 85%, transparent);
+  backdrop-filter: blur(6px);
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 700;
+  text-align: center;
+  pointer-events: auto;
 }
 
 .side-column {
@@ -1637,6 +1659,78 @@ a {
   color: var(--muted);
   font-size: 0.72rem;
   line-height: 1.45;
+}
+
+.git-logs-box {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.git-logs-box__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--muted);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.git-logs-box__content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.git-logs-box__line {
+  font-size: 0.76rem;
+  line-height: 1.4;
+  color: var(--text);
+  font-family: monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.git-panel__logs {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.git-panel__logs-header {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--muted);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.git-panel__logs-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.git-panel__log-line {
+  font-size: 0.76rem;
+  line-height: 1.4;
+  color: var(--text);
+  font-family: monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .panel-help {

@@ -9,6 +9,7 @@ interface GitPanelProps {
   gitPath: string
   gitConfig: GitSyncConfig
   busyAction: GitBusyAction
+  logs: string[]
   pushTitle: string
   pullTitle: string
   syncTitle: string
@@ -18,7 +19,7 @@ interface GitPanelProps {
   onSync: () => void
 }
 
-export function GitPanel({ gitPath, gitConfig, busyAction, pushTitle, pullTitle, syncTitle, onSaveConfig, onPush, onPull, onSync }: GitPanelProps) {
+export function GitPanel({ gitPath, gitConfig, busyAction, logs, pushTitle, pullTitle, syncTitle, onSaveConfig, onPush, onPull, onSync }: GitPanelProps) {
   const { t } = useI18n()
   const [repoUrl, setRepoUrl] = useState(gitConfig.repoUrl)
   const [branch, setBranch] = useState(gitConfig.branch)
@@ -49,6 +50,12 @@ export function GitPanel({ gitPath, gitConfig, busyAction, pushTitle, pullTitle,
       </div>
 
       <div className="git-panel__body">
+        {gitBusy ? (
+          <div className="git-panel__overlay" aria-live="polite" aria-busy="true">
+            <RefreshCw size={20} className="spin" />
+            <span>正在操作...</span>
+          </div>
+        ) : null}
         <div className="field-group">
           <label htmlFor="git-path">{t('git.repoUrl')}</label>
           <input
@@ -99,6 +106,17 @@ export function GitPanel({ gitPath, gitConfig, busyAction, pushTitle, pullTitle,
             {syncBusy ? t('git.syncBusy') : t('git.sync')}
           </button>
         </div>
+
+        {logs.length > 0 && (
+          <div className="git-panel__logs">
+            <div className="git-panel__logs-header">操作日志</div>
+            <div className="git-panel__logs-content">
+              {logs.map((log, index) => (
+                <div key={index} className="git-panel__log-line">{log}</div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </section>
   )

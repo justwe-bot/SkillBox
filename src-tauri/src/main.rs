@@ -15,7 +15,12 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::io::BufReader;
+use std::io::BufRead;
+use std::sync::Arc;
+use std::thread;
+use tauri::Manager;
 use tokio::fs as tokio_fs;
 use tokio::io::AsyncWriteExt;
 use walkdir::{DirEntry, WalkDir};
@@ -1845,6 +1850,61 @@ fn run_git(repo_path: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+fn run_git_with_progress<F>(repo_path: &Path, args: &[&str], on_progress: F) -> Result<String, String>
+where
+    F: Fn(&str) + Send + Sync + 'static,
+{
+    // Add --progress flag for fetch operations to show progress
+    let mut full_args: Vec<&str> = args.to_vec();
+    if args.get(0) == Some(&"fetch") {
+        full_args.insert(1, "--progress");
+    }
+
+    let mut cmd = Command::new("git");
+    cmd.args(&full_args)
+        .current_dir(repo_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn git {}: {}", full_args.join(" "), e))?;
+
+    let stdout = child.stdout.take().expect("stdout pipe");
+    let stderr = child.stderr.take().expect("stderr pipe");
+
+    let on_progress = Arc::new(on_progress);
+    let stdout_callback = Arc::clone(&on_progress);
+    let stderr_callback = Arc::clone(&on_progress);
+
+    let stdout_thread = thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().flatten() {
+            if !line.is_empty() {
+                stdout_callback(&line);
+            }
+        }
+    });
+
+    let stderr_thread = thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().flatten() {
+            if !line.is_empty() {
+                stderr_callback(&line);
+            }
+        }
+    });
+
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
+
+    let status = child.wait().map_err(|e| e.to_string())?;
+
+    if status.success() {
+        Ok(String::new())
+    } else {
+        Err(format!("git {} failed with exit code: {:?}", full_args.join(" "), status.code()))
+    }
+}
+
 fn copy_path_recursive(source: &Path, target: &Path) -> Result<(), String> {
     if source.is_dir() {
         fs::create_dir_all(target).map_err(|e| e.to_string())?;
@@ -2096,13 +2156,8 @@ fn ensure_repo_initialized(repo_path: &Path, git_config: &GitSyncConfig) -> Resu
                 }
             }
         } else {
-            if !branch.is_empty() {
-                let _ = run_git(repo_path, &["init", "-b", branch]);
-            }
-
-            if !git_dir.exists() {
-                run_git(repo_path, &["init"])?;
-            }
+            // Just run git init, don't specify branch - it will use default
+            run_git(repo_path, &["init"])?;
         }
     }
 
@@ -2125,15 +2180,6 @@ fn ensure_repo_initialized(repo_path: &Path, git_config: &GitSyncConfig) -> Resu
         }
     }
 
-    // Only force-switch branch when there are no commits yet; if the repo
-    // already has commits (i.e. local skills exist) we must NOT run
-    // `checkout -B` here because it would fail when untracked files share
-    // names with remote files.  Branch alignment for repos that already have
-    // commits is handled inside git_pull / git_push instead.
-    if !git_config.branch.trim().is_empty() && !repo_has_any_commit(repo_path)? {
-        let _ = run_git(repo_path, &["checkout", "-B", git_config.branch.trim()]);
-    }
-
     Ok(())
 }
 
@@ -2150,8 +2196,27 @@ fn commit_repo_changes(repo_path: &Path) -> Result<bool, String> {
         return Ok(false);
     }
 
-    run_git(repo_path, &["commit", "-m", "Sync AI skills"])?;
-    Ok(true)
+    // Try normal commit first
+    match run_git(repo_path, &["commit", "-m", "Sync AI skills"]) {
+        Ok(_) => return Ok(true),
+        Err(e) if e.contains("cannot lock ref") || e.contains("reference already exists") || e.contains("unable to resolve HEAD") => {
+            // Git repo is corrupted. Re-initialize it.
+            let git_dir = repo_path.join(".git");
+            
+            // Remove the entire .git directory
+            let _ = fs::remove_dir_all(&git_dir);
+            
+            // Re-initialize git repo
+            run_git(repo_path, &["init"])?;
+            
+            // Re-add all files and commit
+            run_git(repo_path, &["add", "."])?;
+            run_git(repo_path, &["commit", "-m", "Sync AI skills"])?;
+            
+            Ok(true)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn repo_has_local_changes(repo_path: &Path) -> Result<bool, String> {
@@ -2703,9 +2768,8 @@ fn add_custom_app(name: String, path: String) -> Result<(), String> {
     save_config(&config)
 }
 
-#[tauri::command]
-fn sync_to_git(repo_path: String) -> Result<(), String> {
-    let repo = PathBuf::from(&repo_path);
+fn sync_to_git_internal(repo_path: &str) -> Result<(), String> {
+    let repo = PathBuf::from(repo_path);
     if !repo.exists() {
         fs::create_dir_all(&repo).map_err(|e| e.to_string())?;
     }
@@ -2807,6 +2871,13 @@ fn sync_to_git(repo_path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn sync_to_git(repo_path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || sync_to_git_internal(&repo_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn get_git_config() -> Result<GitSyncConfig, String> {
     let config = load_config();
     Ok(config.git_config)
@@ -2827,170 +2898,126 @@ fn save_git_config(config: GitSyncConfig) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn git_push(repo_path: String) -> Result<(), String> {
-    let app_config = load_config();
-    if app_config.git_config.repo_url.trim().is_empty() {
-        return Err("请先保存仓库地址".to_string());
-    }
+async fn git_push(repo_path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let app_config = load_config();
+        if app_config.git_config.repo_url.trim().is_empty() {
+            return Err("请先保存仓库地址".to_string());
+        }
 
-    let sync_dir = PathBuf::from(&repo_path);
-    fs::create_dir_all(&sync_dir).map_err(|e| e.to_string())?;
-    let repo = resolve_internal_git_repo_dir(&sync_dir);
-    ensure_repo_initialized(&repo, &app_config.git_config)?;
-    sync_skill_workspace(&sync_dir, &repo, true)?;
-    let _ = commit_repo_changes(&repo)?;
-    
-    // Check push permission before actual push
-    let branch = app_config.git_config.branch.trim();
-    if let Err(e) = run_git(&repo, &["ls-remote", "--exit-code", "origin", branch]) {
-        return Err(format!(
-            "无法推送到远程仓库，请检查：\n\
-            1. 是否有该仓库的写权限\n\
-            2. 远程分支 '{}' 是否存在\n\
-            3. 网络连接是否正常\n\n错误详情: {}",
-            branch, e
-        ));
-    }
-    
-    run_git(&repo, &["push", "-u", "origin", branch])?;
-    Ok(())
+        let sync_dir = PathBuf::from(&repo_path);
+        fs::create_dir_all(&sync_dir).map_err(|e| e.to_string())?;
+        let repo = resolve_internal_git_repo_dir(&sync_dir);
+        ensure_repo_initialized(&repo, &app_config.git_config)?;
+        sync_skill_workspace(&sync_dir, &repo, true)?;
+        let _ = commit_repo_changes(&repo)?;
+        
+        // Check push permission before actual push
+        let branch = app_config.git_config.branch.trim();
+        if let Err(e) = run_git(&repo, &["ls-remote", "--exit-code", "origin", branch]) {
+            return Err(format!(
+                "无法推送到远程仓库，请检查：\n\
+                1. 是否有该仓库的写权限\n\
+                2. 远程分支 '{}' 是否存在\n\
+                3. 网络连接是否正常\n\n错误详情: {}",
+                branch, e
+            ));
+        }
+        
+        run_git(&repo, &["push", "-u", "origin", branch])?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn git_pull(repo_path: String) -> Result<String, String> {
-    let app_config = load_config();
-    if app_config.git_config.repo_url.trim().is_empty() {
-        return Err("请先保存仓库地址".to_string());
-    }
-
-    let sync_dir = PathBuf::from(&repo_path);
-    fs::create_dir_all(&sync_dir).map_err(|e| e.to_string())?;
-    let repo = resolve_internal_git_repo_dir(&sync_dir);
-    ensure_repo_initialized(&repo, &app_config.git_config)?;
-    sync_skill_workspace(&sync_dir, &repo, false)?;
-
-    let has_commit = repo_has_any_commit(&repo)?;
-
-    if !has_commit {
-        let branch = app_config.git_config.branch.trim().to_string();
-
-        // Commit whatever local skills already exist so they are preserved.
-        run_git(&repo, &["add", "."])?;
-        let _ = commit_repo_changes(&repo)?;
-
-        // Fetch remote content.
-        run_git(&repo, &["fetch", "origin", &branch])?;
-
-        let fetch_head = repo.join(".git/FETCH_HEAD");
-        if fetch_head.exists() {
-            // Merge remote history into the local initial commit so that
-            // local skills (5) and remote skills (10) are combined (15).
-            // --allow-unrelated-histories is required because the two trees
-            // have no common ancestor yet.
-            let merge_result = run_git(
-                &repo,
-                &[
-                    "merge",
-                    "--allow-unrelated-histories",
-                    "--no-edit",
-                    "FETCH_HEAD",
-                ],
-            );
-
-            if let Err(e) = merge_result {
-                // Surface a clear message if there are genuine conflicts.
-                return Err(format!("合并远程内容时发生冲突，请手动解决后重试: {}", e));
-            }
-
-            // Align the local branch name with the configured branch.
-            let _ = run_git(&repo, &["branch", "-M", &branch]);
+async fn git_pull(repo_path: String, app_handle: tauri::AppHandle) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let app_config = load_config();
+        if app_config.git_config.repo_url.trim().is_empty() {
+            return Err("请先保存仓库地址".to_string());
         }
 
-        sync_skill_workspace(&repo, &sync_dir, true)?;
-        rebuild_managed_links_for_all_apps(&app_config)?;
-        return Ok("已将本地 skills 与远程仓库合并".to_string());
-    }
+        let sync_dir = PathBuf::from(&repo_path);
+        fs::create_dir_all(&sync_dir).map_err(|e| e.to_string())?;
+        let repo = resolve_internal_git_repo_dir(&sync_dir);
+        ensure_repo_initialized(&repo, &app_config.git_config)?;
+        
+        let _ = app_handle.emit_all("git-log", "初始化完成，开始同步工作区...");
+        sync_skill_workspace(&sync_dir, &repo, false)?;
 
-    let branch = app_config.git_config.branch.trim().to_string();
+        let has_commit = repo_has_any_commit(&repo)?;
 
-    // Commit any local changes first so nothing is lost.
-    // We intentionally avoid `git stash` here because it fails when the
-    // working tree contains symlinks or files with unusual permissions
-    // (error: "could not write index").
-    let had_local_changes = repo_has_local_changes(&repo)?;
-    if had_local_changes {
-        run_git(&repo, &["add", "."])?;
-        let _ = commit_repo_changes(&repo)?;
-    }
+        if !has_commit {
+            let branch = app_config.git_config.branch.trim().to_string();
 
-    // Fetch then merge so that local commits and remote commits are combined.
-    // --allow-unrelated-histories handles the case where the two trees have
-    // diverged (e.g. local was initialised independently of the remote).
-    run_git(&repo, &["fetch", "origin", &branch])?;
-
-    let merge_result = run_git(
-        &repo,
-        &[
-            "merge",
-            "--allow-unrelated-histories",
-            "--no-edit",
-            &format!("origin/{}", branch),
-        ],
-    );
-
-    if let Err(e) = merge_result {
-        return Err(format!("合并远程内容时发生冲突，请手动解决后重试: {}", e));
-    }
-
-    sync_skill_workspace(&repo, &sync_dir, true)?;
-    rebuild_managed_links_for_all_apps(&app_config)?;
-    Ok("已从远程仓库拉取最新内容".to_string())
-}
-
-#[tauri::command]
-fn git_sync(repo_path: String) -> Result<String, String> {
-    let app_config = load_config();
-    if app_config.git_config.repo_url.trim().is_empty() {
-        return Err("请先保存仓库地址".to_string());
-    }
-
-    let sync_dir = PathBuf::from(&repo_path);
-    fs::create_dir_all(&sync_dir).map_err(|e| e.to_string())?;
-    let repo = resolve_internal_git_repo_dir(&sync_dir);
-    ensure_repo_initialized(&repo, &app_config.git_config)?;
-    sync_skill_workspace(&sync_dir, &repo, false)?;
-
-    let branch = app_config.git_config.branch.trim().to_string();
-    let has_commit = repo_has_any_commit(&repo)?;
-
-    if !has_commit {
-        // No local commits yet — commit existing files first, then merge remote.
-        run_git(&repo, &["add", "."])?;
-        let _ = commit_repo_changes(&repo)?;
-
-        run_git(&repo, &["fetch", "origin", &branch])?;
-
-        let fetch_head = repo.join(".git/FETCH_HEAD");
-        if fetch_head.exists() {
-            let _ = run_git(
-                &repo,
-                &[
-                    "merge",
-                    "--allow-unrelated-histories",
-                    "--no-edit",
-                    "FETCH_HEAD",
-                ],
-            );
-            let _ = run_git(&repo, &["branch", "-M", &branch]);
-        }
-    } else {
-        // Commit any local changes before fetching so stash is never needed.
-        if repo_has_local_changes(&repo)? {
+            // Commit whatever local skills already exist so they are preserved.
+            let _ = app_handle.emit_all("git-log", "提交本地技能文件...");
             run_git(&repo, &["add", "."])?;
             let _ = commit_repo_changes(&repo)?;
+            // Re-ensure remote is configured in case repo was re-initialized
+            ensure_repo_initialized(&repo, &app_config.git_config)?;
+
+            // Fetch remote content.
+            let _ = app_handle.emit_all("git-log", format!("正在从远程获取 '{}' 分支...", branch));
+            let handle = app_handle.clone();
+            run_git_with_progress(&repo, &["fetch", "origin", &branch], move |line| {
+                // Only emit significant progress lines, not every percentage update
+                if line.contains("done.") || line.contains("error") || line.contains("fatal") {
+                    let _ = handle.emit_all("git-log", line.to_string());
+                }
+            })?;
+            let _ = app_handle.emit_all("git-log", "获取远程数据完成");
+
+            let fetch_head = repo.join(".git/FETCH_HEAD");
+            if fetch_head.exists() {
+                let _ = app_handle.emit_all("git-log", "合并远程历史...");
+                let merge_result = run_git(
+                    &repo,
+                    &[
+                        "merge",
+                        "--allow-unrelated-histories",
+                        "--no-edit",
+                        "FETCH_HEAD",
+                    ],
+                );
+
+                if let Err(e) = merge_result {
+                    return Err(format!("合并远程内容时发生冲突，请手动解决后重试: {}", e));
+                }
+                
+                let _ = app_handle.emit_all("git-log", "合并完成");
+                let _ = run_git(&repo, &["branch", "-M", &branch]);
+            }
+
+            let _ = app_handle.emit_all("git-log", "同步工作区...");
+            sync_skill_workspace(&repo, &sync_dir, true)?;
+            let _ = app_handle.emit_all("git-log", "重建应用链接...");
+            rebuild_managed_links_for_all_apps(&app_config)?;
+            let _ = app_handle.emit_all("git-log", "✓ 完成！");
+            return Ok("已将本地 skills 与远程仓库合并".to_string());
         }
-        run_git(&repo, &["fetch", "origin", &branch])?;
-        let _ = run_git(
+
+        let branch = app_config.git_config.branch.trim().to_string();
+
+        let had_local_changes = repo_has_local_changes(&repo)?;
+        if had_local_changes {
+            let _ = app_handle.emit_all("git-log", "提交本地更改...");
+            run_git(&repo, &["add", "."])?;
+            let _ = commit_repo_changes(&repo)?;
+            // Re-ensure remote is configured in case repo was re-initialized
+            ensure_repo_initialized(&repo, &app_config.git_config)?;
+        }
+
+        let _ = app_handle.emit_all("git-log", format!("正在从远程获取 '{}' 分支...", branch));
+        let handle = app_handle.clone();
+        run_git_with_progress(&repo, &["fetch", "origin", &branch], move |line| {
+            let _ = handle.emit_all("git-log", line.to_string());
+        })?;
+
+        let _ = app_handle.emit_all("git-log", "合并远程更改...");
+        let merge_result = run_git(
             &repo,
             &[
                 "merge",
@@ -2999,15 +3026,89 @@ fn git_sync(repo_path: String) -> Result<String, String> {
                 &format!("origin/{}", branch),
             ],
         );
-    }
 
-    sync_skill_workspace(&repo, &sync_dir, true)?;
-    sync_to_git(repo_path.clone())?;
-    sync_skill_workspace(&sync_dir, &repo, true)?;
-    let _ = commit_repo_changes(&repo)?;
-    run_git(&repo, &["push", "-u", "origin", &branch])?;
-    rebuild_managed_links_for_all_apps(&app_config)?;
-    Ok("已完成拉取、同步并推送到远程仓库".to_string())
+        if let Err(e) = merge_result {
+            return Err(format!("合并远程内容时发生冲突，请手动解决后重试: {}", e));
+        }
+        
+        let _ = app_handle.emit_all("git-log", "合并完成");
+
+        let _ = app_handle.emit_all("git-log", "同步工作区...");
+        sync_skill_workspace(&repo, &sync_dir, true)?;
+        let _ = app_handle.emit_all("git-log", "重建应用链接...");
+        rebuild_managed_links_for_all_apps(&app_config)?;
+        let _ = app_handle.emit_all("git-log", "✓ 完成！");
+        Ok("已从远程仓库拉取最新内容".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn git_sync(repo_path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let app_config = load_config();
+        if app_config.git_config.repo_url.trim().is_empty() {
+            return Err("请先保存仓库地址".to_string());
+        }
+
+        let sync_dir = PathBuf::from(&repo_path);
+        fs::create_dir_all(&sync_dir).map_err(|e| e.to_string())?;
+        let repo = resolve_internal_git_repo_dir(&sync_dir);
+        ensure_repo_initialized(&repo, &app_config.git_config)?;
+        sync_skill_workspace(&sync_dir, &repo, false)?;
+
+        let branch = app_config.git_config.branch.trim().to_string();
+        let has_commit = repo_has_any_commit(&repo)?;
+
+        if !has_commit {
+            // No local commits yet — commit existing files first, then merge remote.
+            run_git(&repo, &["add", "."])?;
+            let _ = commit_repo_changes(&repo)?;
+
+            run_git(&repo, &["fetch", "origin", &branch])?;
+
+            let fetch_head = repo.join(".git/FETCH_HEAD");
+            if fetch_head.exists() {
+                let _ = run_git(
+                    &repo,
+                    &[
+                        "merge",
+                        "--allow-unrelated-histories",
+                        "--no-edit",
+                        "FETCH_HEAD",
+                    ],
+                );
+                let _ = run_git(&repo, &["branch", "-M", &branch]);
+            }
+        } else {
+            // Commit any local changes before fetching so stash is never needed.
+            if repo_has_local_changes(&repo)? {
+                run_git(&repo, &["add", "."])?;
+                let _ = commit_repo_changes(&repo)?;
+            }
+            run_git(&repo, &["fetch", "origin", &branch])?;
+            let _ = run_git(
+                &repo,
+                &[
+                    "merge",
+                    "--allow-unrelated-histories",
+                    "--no-edit",
+                    &format!("origin/{}", branch),
+                ],
+            );
+        }
+
+        sync_skill_workspace(&repo, &sync_dir, true)?;
+        sync_to_git_internal(&repo_path)?;
+        sync_skill_workspace(&sync_dir, &repo, true)?;
+        let _ = commit_repo_changes(&repo)?;
+        run_git(&repo, &["push", "-u", "origin", &branch])?;
+        rebuild_managed_links_for_all_apps(&app_config)?;
+        Ok("已完成拉取、同步并推送到远程仓库".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

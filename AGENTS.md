@@ -52,3 +52,24 @@
 - Avoid changing unrelated files in a dirty worktree.
 - Keep new user-facing actions consistent with the existing dashboard and settings flows.
 - When adding new settings or commands, make sure the README and this file still reflect the real project structure.
+
+## Release Process
+
+打 tag 发布新版本时，需要同步更新以下文件中的版本号：
+
+1. **package.json** - 前端版本号
+2. **src-tauri/tauri.conf.json** - Tauri 配置中的版本号
+3. **src-tauri/Cargo.toml** - Rust 包版本号（这个会被 `get_version()` 读取）
+
+发布流程：
+```bash
+# 1. 更新版本号（修改上述3个文件）
+# 2. 提交更改
+git add -A && git commit -m "chore: bump version to x.x.x"
+
+# 3. 打 tag 并推送（必须先更新版本号再打 tag，否则构建会使用旧版本）
+git tag -a vx.x.x -m "Release version x.x.x"
+git push origin main --tags
+```
+
+注意：打 tag 前必须先更新版本号并提交，CI 会基于 tag 时的代码自动构建发布。

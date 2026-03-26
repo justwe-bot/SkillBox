@@ -940,8 +940,7 @@ a {
 }
 
 .skill-item--conflict {
-  border-color: rgba(221, 35, 72, 0.3);
-  background: linear-gradient(180deg, var(--panel-raised) 0%, color-mix(in srgb, var(--danger) 6%, var(--panel-raised)) 100%);
+  border-color: rgba(221, 35, 72, 0.4);
 }
 
 .skill-item__meta {

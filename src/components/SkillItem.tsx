@@ -58,7 +58,7 @@ export function SkillItem({ skill, onView, onRename, onDelete, onResolveConflict
 
       <div className="skill-item__actions">
         {skill.conflicts ? (
-          <button className="button button--ghost button--compact" type="button" onClick={() => onResolveConflict(skill)}>
+          <button className="button button--danger button--compact" type="button" onClick={() => onResolveConflict(skill)}>
             {t('dashboard.skill.resolveConflict')}
           </button>
         ) : null}

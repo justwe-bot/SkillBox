@@ -414,11 +414,19 @@ export default function DashboardPage() {
   }, [apps])
 
   const stats = useMemo(() => {
+    // 统计同名技能冲突
+    const nameCount = new Map<string, number>()
+    for (const skill of skills) {
+      const count = nameCount.get(skill.name) ?? 0
+      nameCount.set(skill.name, count + 1)
+    }
+    const conflictCount = skills.filter((skill) => skill.conflicts || (nameCount.get(skill.name) ?? 0) > 1).length
+
     return {
       appCount: apps.filter((app) => app.isInstalled).length,
       skillCount: skills.length,
       linkedCount: apps.filter((app) => app.isLinked).length,
-      conflictCount: skills.filter((skill) => skill.conflicts).length,
+      conflictCount,
     }
   }, [apps, skills])
   const linkedAppsCount = useMemo(() => apps.filter((app) => app.isLinked).length, [apps])

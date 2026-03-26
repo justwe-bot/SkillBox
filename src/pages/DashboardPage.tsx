@@ -351,12 +351,24 @@ export default function DashboardPage() {
   const filteredSkills = useMemo(() => {
     const normalizedSkills = [...skills].sort((left, right) => left.name.localeCompare(right.name, language))
 
+    // 检测同名技能并标记冲突
+    const nameCount = new Map<string, number>()
+    for (const skill of normalizedSkills) {
+      const count = nameCount.get(skill.name) ?? 0
+      nameCount.set(skill.name, count + 1)
+    }
+
+    const skillsWithConflict = normalizedSkills.map((skill) => ({
+      ...skill,
+      conflicts: skill.conflicts || (nameCount.get(skill.name) ?? 0) > 1,
+    }))
+
     if (!search.trim()) {
-      return normalizedSkills
+      return skillsWithConflict
     }
 
     const query = search.trim().toLowerCase()
-    return normalizedSkills.filter((skill) => {
+    return skillsWithConflict.filter((skill) => {
       return (
         skill.name.toLowerCase().includes(query) ||
         skill.description.toLowerCase().includes(query) ||

@@ -729,18 +729,16 @@ fn find_known_app(app_id: &str) -> Option<KnownApp> {
 fn should_skip_walk_entry(entry: &DirEntry) -> bool {
     let name = entry.file_name().to_string_lossy();
 
-    // Always skip these directories (at any depth)
-    if matches!(
-        name.as_ref(),
-        ".git" | "node_modules" | "target" | "__pycache__" | ".DS_Store"
-    ) {
+    // Skip all hidden directories/files (starting with .)
+    if name.starts_with('.') {
         return false;
     }
 
-    // Skip .skillbox-git only at the top level (depth == 1)
-    // This prevents scanning .skillbox-git when walking the outer sync directory,
-    // but allows normal scanning when .skillbox-git is the root being scanned.
-    if name == INTERNAL_GIT_REPO_DIR && entry.depth() == 1 {
+    // Always skip these directories (at any depth)
+    if matches!(
+        name.as_ref(),
+        "node_modules" | "target" | "__pycache__"
+    ) {
         return false;
     }
 
@@ -2786,8 +2784,8 @@ fn sync_to_git_internal(repo_path: &str) -> Result<(), String> {
     if let Ok(existing_entries) = fs::read_dir(&repo) {
         for entry in existing_entries.filter_map(Result::ok) {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name != ".git"
-                && name != INTERNAL_GIT_REPO_DIR
+            // 排除隐藏目录和特殊文件
+            if !name.starts_with('.')
                 && name != SYNC_MANIFEST_FILE
                 && name != SYNC_ENABLED_SKILLS_FILE
             {

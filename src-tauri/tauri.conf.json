@@ -7,7 +7,7 @@
   },
   "package": {
     "productName": "SkillBox",
-    "version": "2026.3.263"
+    "version": "2026.3.264"
   },
   "tauri": {
     "allowlist": {

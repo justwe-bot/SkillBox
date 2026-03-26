@@ -3461,23 +3461,31 @@ async fn download_update(window: tauri::Window) -> Result<DownloadUpdateResult, 
 
     let target_path = download_dir.join(&asset.name);
     emit_update_download_progress(&window, &asset.name, 0, None, "preparing");
+    
+    // Check if the existing file matches the expected asset
     if target_path.exists() {
-        let existing_size = fs::metadata(&target_path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        emit_update_download_progress(
-            &window,
-            &asset.name,
-            existing_size,
-            Some(existing_size),
-            "completed",
-        );
-        return Ok(DownloadUpdateResult {
-            version: latest_version,
-            file_name: asset.name,
-            file_path: target_path.to_string_lossy().to_string(),
-            release_url: release.html_url,
-        });
+        // Verify the file name contains the latest version to ensure it's not a cached old version
+        if asset.name.contains(&latest_version) {
+            let existing_size = fs::metadata(&target_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            emit_update_download_progress(
+                &window,
+                &asset.name,
+                existing_size,
+                Some(existing_size),
+                "completed",
+            );
+            return Ok(DownloadUpdateResult {
+                version: latest_version,
+                file_name: asset.name,
+                file_path: target_path.to_string_lossy().to_string(),
+                release_url: release.html_url,
+            });
+        } else {
+            // Old cached file, delete it and download fresh
+            let _ = fs::remove_file(&target_path);
+        }
     }
 
     let response = client

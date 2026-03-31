@@ -119,6 +119,10 @@ export function saveGitPath(path: string) {
   return invoke<void>('save_git_path', { path })
 }
 
+export function probeGitDirectoryAccess(path: string) {
+  return invoke<void>('probe_git_directory_access', { path })
+}
+
 export function getGitConfig() {
   return invoke<GitSyncConfig>('get_git_config')
 }

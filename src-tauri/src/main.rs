@@ -1875,11 +1875,15 @@ fn rebuild_managed_links_for_all_apps(config: &AppConfig) -> Result<(), String> 
 }
 
 fn run_git(repo_path: &Path, args: &[&str]) -> Result<String, String> {
+    let safe_working_dir = std::env::temp_dir();
+    let repo_path_string = repo_path.to_string_lossy().to_string();
     let output = Command::new("git")
+        .arg("-C")
+        .arg(&repo_path_string)
         .args(args)
-        .current_dir(repo_path)
+        .current_dir(&safe_working_dir)
         .output()
-        .map_err(|e| format!("Failed to run git {}: {}", args.join(" "), e))?;
+        .map_err(|e| format!("Failed to run git -C {} {}: {}", repo_path.display(), args.join(" "), e))?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -1887,7 +1891,7 @@ fn run_git(repo_path: &Path, args: &[&str]) -> Result<String, String> {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let message = if stderr.is_empty() { stdout } else { stderr };
-        Err(format!("git {} failed: {}", args.join(" "), message))
+        Err(format!("git -C {} {} failed: {}", repo_path.display(), args.join(" "), message))
     }
 }
 
@@ -1946,80 +1950,6 @@ fn forward_git_progress_stream<R, F>(
             },
             Err(_) => break,
         }
-    }
-}
-
-fn run_git_with_progress<F>(
-    repo_path: &Path,
-    args: &[&str],
-    on_progress: F,
-) -> Result<String, String>
-where
-    F: Fn(&str) + Send + Sync + 'static,
-{
-    const MAX_LOG_LINES: usize = 12;
-
-    let mut cmd = Command::new("git");
-    cmd.args(args)
-        .current_dir(repo_path)
-        .env("GIT_FLUSH", "1")
-        .env("GIT_PROGRESS_DELAY", "1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn git {}: {}", args.join(" "), e))?;
-
-    let stdout = child.stdout.take().expect("stdout pipe");
-    let stderr = child.stderr.take().expect("stderr pipe");
-
-    let on_progress = Arc::new(on_progress);
-    let stdout_callback = Arc::clone(&on_progress);
-    let stderr_callback = Arc::clone(&on_progress);
-    let log_lines = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_LOG_LINES)));
-    let stdout_lines = Arc::clone(&log_lines);
-    let stderr_lines = Arc::clone(&log_lines);
-
-    let stdout_thread = thread::spawn(move || {
-        forward_git_progress_stream(stdout, stdout_callback, stdout_lines, MAX_LOG_LINES);
-    });
-
-    let stderr_thread = thread::spawn(move || {
-        forward_git_progress_stream(stderr, stderr_callback, stderr_lines, MAX_LOG_LINES);
-    });
-
-    let _ = stdout_thread.join();
-    let _ = stderr_thread.join();
-
-    let status = child.wait().map_err(|e| e.to_string())?;
-
-    if status.success() {
-        Ok(String::new())
-    } else {
-        let details = log_lines
-            .lock()
-            .ok()
-            .map(|lines| {
-                lines
-                    .iter()
-                    .filter(|line| !line.trim().is_empty())
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default();
-
-        Err(format!(
-            "git {} failed with exit code: {:?}{}",
-            args.join(" "),
-            status.code(),
-            if details.is_empty() {
-                String::new()
-            } else {
-                format!("\n{}", details)
-            }
-        ))
     }
 }
 
@@ -2266,19 +2196,12 @@ fn clone_remote_snapshot(
     git_config: &GitSyncConfig,
     app_handle: Option<&tauri::AppHandle>,
 ) -> Result<(), String> {
-    let parent = repo_path
-        .parent()
-        .ok_or_else(|| "Unable to resolve repository parent directory".to_string())?;
-    let repo_name = repo_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| "Unable to resolve repository directory name".to_string())?;
-
+    let safe_working_dir = std::env::temp_dir();
+    let repo_path_string = repo_path.to_string_lossy().to_string();
     let branch = normalized_git_branch(git_config);
     let progress_handle = app_handle.cloned();
-    run_git_with_progress(
-        parent,
-        &[
+    let mut cmd = Command::new("git");
+    cmd.args([
             "clone",
             "--progress",
             "--depth",
@@ -2287,14 +2210,70 @@ fn clone_remote_snapshot(
             &branch,
             "--single-branch",
             git_config.repo_url.trim(),
-            repo_name,
-        ],
-        move |line| {
-            emit_git_log(progress_handle.as_ref(), line);
-        },
-    )?;
+            &repo_path_string,
+        ])
+        .current_dir(&safe_working_dir)
+        .env("GIT_FLUSH", "1")
+        .env("GIT_PROGRESS_DELAY", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    Ok(())
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn git clone {}: {}", git_config.repo_url.trim(), e))?;
+
+    let stdout = child.stdout.take().expect("stdout pipe");
+    let stderr = child.stderr.take().expect("stderr pipe");
+    let on_progress = Arc::new(move |line: &str| {
+        emit_git_log(progress_handle.as_ref(), line);
+    });
+    let stdout_callback = Arc::clone(&on_progress);
+    let stderr_callback = Arc::clone(&on_progress);
+    let log_lines = Arc::new(Mutex::new(VecDeque::with_capacity(12)));
+    let stdout_lines = Arc::clone(&log_lines);
+    let stderr_lines = Arc::clone(&log_lines);
+
+    let stdout_thread = thread::spawn(move || {
+        forward_git_progress_stream(stdout, stdout_callback, stdout_lines, 12);
+    });
+
+    let stderr_thread = thread::spawn(move || {
+        forward_git_progress_stream(stderr, stderr_callback, stderr_lines, 12);
+    });
+
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
+
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        let details = log_lines
+            .lock()
+            .ok()
+            .map(|lines| {
+                lines
+                    .iter()
+                    .filter(|line| !line.trim().is_empty())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+
+        Err(format!(
+            "git clone --progress --depth 1 --branch {} --single-branch {} {} failed with exit code: {:?}{}",
+            branch,
+            git_config.repo_url.trim(),
+            repo_path.display(),
+            status.code(),
+            if details.is_empty() {
+                String::new()
+            } else {
+                format!("\n{}", details)
+            }
+        ))
+    }
 }
 
 fn emit_git_log(app_handle: Option<&tauri::AppHandle>, message: &str) {
@@ -3179,6 +3158,53 @@ fn save_git_path(path: String) -> Result<(), String> {
     rebuild_managed_links_for_all_apps(&config)
 }
 
+#[cfg(target_os = "macos")]
+fn macos_protected_folder_key(path: &Path) -> Option<&'static str> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let targets = [
+        ("documents", home.join("Documents")),
+        ("desktop", home.join("Desktop")),
+        ("downloads", home.join("Downloads")),
+    ];
+
+    targets
+        .iter()
+        .find_map(|(key, target)| path.starts_with(target).then_some(*key))
+}
+
+fn map_directory_access_error(path: &Path, error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        #[cfg(target_os = "macos")]
+        if let Some(folder_key) = macos_protected_folder_key(path) {
+            return format!("permission_denied:{}", folder_key);
+        }
+    }
+
+    error.to_string()
+}
+
+fn probe_directory_access(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(|error| map_directory_access_error(path, &error))?;
+    fs::read_dir(path).map_err(|error| map_directory_access_error(path, &error))?;
+
+    let probe_path = path.join(format!(".skillbox-access-probe-{}", std::process::id()));
+    fs::write(&probe_path, b"skillbox-access-probe")
+        .map_err(|error| map_directory_access_error(path, &error))?;
+    fs::remove_file(&probe_path).map_err(|error| map_directory_access_error(path, &error))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn probe_git_directory_access(path: String) -> Result<(), String> {
+    let normalized_path = path.trim();
+    if normalized_path.is_empty() {
+        return Err("invalid_path".to_string());
+    }
+
+    probe_directory_access(Path::new(normalized_path))
+}
+
 fn normalize_version(value: &str) -> Option<Vec<u64>> {
     let core = value
         .trim()
@@ -3658,6 +3684,7 @@ fn main() {
             unlink_app,
             select_folder,
             save_git_path,
+            probe_git_directory_access,
             set_custom_path,
             open_path_in_file_manager,
             launch_app,

@@ -3,6 +3,7 @@ import { flushSync } from 'react-dom'
 import { Link } from 'react-router-dom'
 import { open as openDialog } from '@tauri-apps/api/dialog'
 import { listen } from '@tauri-apps/api/event'
+import { open as openExternal } from '@tauri-apps/api/shell'
 import { Archive, BookOpen, FolderOpen, FolderPlus, RefreshCw, Scan, Search, Settings } from 'lucide-react'
 import { ApplicationCard } from '../components/ApplicationCard'
 import { FigmaSkillIcon } from '../components/FigmaSkillIcon'
@@ -26,6 +27,7 @@ import {
   scanGitPathSkills,
   launchApp,
   openPathInFileManager,
+  probeGitDirectoryAccess,
   renameSkill,
   saveGitConfig as persistGitConfig,
   saveAppEnabledSkills,
@@ -52,6 +54,7 @@ type LinkBusyState = {
 }
 
 type GitTransferPhase = 'receivingObjects' | 'resolvingDeltas' | 'filteringContent' | 'updatingFiles'
+type GitProtectedFolderKey = 'documents' | 'desktop' | 'downloads'
 
 type GitTransferProgress = {
   phase: GitTransferPhase
@@ -78,6 +81,7 @@ const GUIDE_STEP_COUNT = 5
 const GUIDE_HIGHLIGHT_DURATION_MS = 2200
 const MAX_GIT_LOG_LINES = 80
 const GIT_PROGRESS_LINE_REGEX = /^([^:]+):\s+(\d+)%\s+\((\d+)\/(\d+)\)(?:,\s+([^|,]+?)\s+\|\s+([^,]+?))?(?:,.*)?$/
+const MACOS_FILES_AND_FOLDERS_SETTINGS_URL = 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders'
 
 function loadDashboardSnapshot(): DashboardSnapshot | null {
   try {
@@ -217,9 +221,14 @@ function findLatestGitTransferProgress(lines: string[]): GitTransferProgress | n
   return null
 }
 
+function parseGitProtectedFolderError(error: unknown): GitProtectedFolderKey | null {
+  const match = String(error).match(/permission_denied:(documents|desktop|downloads)/)
+  return (match?.[1] as GitProtectedFolderKey | undefined) ?? null
+}
+
 export default function DashboardPage() {
   const { language, t } = useI18n()
-  const { notify } = useToast()
+  const { notify, notifyAction } = useToast()
   const cachedSnapshotRef = useRef<DashboardSnapshot | null>(loadDashboardSnapshot())
   const initialPreferencesRef = useRef(loadPreferences())
   const [activeTab, setActiveTab] = useState<TabKey>(() => cachedSnapshotRef.current?.activeTab ?? 'applications')
@@ -270,6 +279,50 @@ export default function DashboardPage() {
   const syncAreaRef = useRef<HTMLDivElement | null>(null)
   const gitPanelRef = useRef<HTMLDivElement | null>(null)
   const highlightTimerRef = useRef<number | null>(null)
+
+  async function openMacFilesAndFoldersSettings() {
+    try {
+      await openExternal(MACOS_FILES_AND_FOLDERS_SETTINGS_URL)
+    } catch (error) {
+      notify(t('dashboard.notifications.openPermissionSettingsFailed', { error: String(error) }), 'error')
+    }
+  }
+
+  function showGitDirectoryPermissionToast(folderKey: GitProtectedFolderKey) {
+    const message = folderKey === 'documents'
+      ? t('dashboard.permissions.documentsAccessDenied')
+      : folderKey === 'desktop'
+        ? t('dashboard.permissions.desktopAccessDenied')
+        : t('dashboard.permissions.downloadsAccessDenied')
+
+    notifyAction(message, {
+      tone: 'error',
+      durationMs: 9000,
+      actions: [
+        {
+          label: t('dashboard.permissions.openSettings'),
+          style: 'primary',
+          onClick: () => void openMacFilesAndFoldersSettings(),
+        },
+      ],
+    })
+  }
+
+  async function ensureGitDirectoryAccess(path: string) {
+    try {
+      await probeGitDirectoryAccess(path)
+      return true
+    } catch (error) {
+      const protectedFolder = parseGitProtectedFolderError(error)
+      if (protectedFolder) {
+        showGitDirectoryPermissionToast(protectedFolder)
+        return false
+      }
+
+      notify(t('dashboard.notifications.directoryAccessCheckFailed', { error: String(error) }), 'error')
+      return false
+    }
+  }
 
   function beginScanSession() {
     const sessionId = scanSessionRef.current + 1
@@ -793,6 +846,11 @@ export default function DashboardPage() {
         await unlinkApp(app.id)
         notify(t('dashboard.notifications.linkRemoved', { name: app.name }), 'success')
       } else {
+        if (!(await ensureGitDirectoryAccess(gitPath))) {
+          setBusyAppId(null)
+          setLinkBusyState(null)
+          return
+        }
         await linkApp(app.id, gitPath)
         notify(t('dashboard.notifications.linkCreated', { name: app.name }), 'success')
       }
@@ -848,6 +906,10 @@ export default function DashboardPage() {
       return
     }
 
+    if (!(await ensureGitDirectoryAccess(gitPath))) {
+      return
+    }
+
     flushSync(() => setGitBusyAction('aggregate'))
     await waitForBusyOverlayPaint()
     try {
@@ -875,6 +937,10 @@ export default function DashboardPage() {
     })
 
     if (typeof selected === 'string' && selected) {
+      if (!(await ensureGitDirectoryAccess(selected))) {
+        setGitBusyAction(null)
+        return
+      }
       setPendingGitPath(selected)
       setConfirmGitPathOpen(true)
     }
@@ -890,6 +956,9 @@ export default function DashboardPage() {
     flushSync(() => setGitBusyAction('changePath'))
     await waitForBusyOverlayPaint()
     try {
+      if (!(await ensureGitDirectoryAccess(pendingGitPath))) {
+        return
+      }
       await saveGitPath(pendingGitPath)
       await syncToGit(pendingGitPath)
       setGitPath(pendingGitPath)
@@ -907,6 +976,10 @@ export default function DashboardPage() {
   async function handleSync() {
     if (gitBusy || !gitPath) {
       notify(t('dashboard.notifications.chooseSyncDirFirst'), 'error')
+      return
+    }
+
+    if (!(await ensureGitDirectoryAccess(gitPath))) {
       return
     }
 
@@ -929,6 +1002,10 @@ export default function DashboardPage() {
       return
     }
 
+    if (!(await ensureGitDirectoryAccess(gitPath))) {
+      return
+    }
+
     flushSync(() => setGitBusyAction('push'))
     await waitForBusyOverlayPaint()
     try {
@@ -945,6 +1022,10 @@ export default function DashboardPage() {
   async function handlePull() {
     if (gitBusy || !gitPath) {
       notify(t('dashboard.notifications.chooseSyncDirFirst'), 'error')
+      return
+    }
+
+    if (!(await ensureGitDirectoryAccess(gitPath))) {
       return
     }
 

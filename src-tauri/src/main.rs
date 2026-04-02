@@ -10,15 +10,17 @@ use figma::{
     DesignToken, FigmaClient, FigmaComment, FigmaFile, FigmaFileData,
 };
 use futures_util::StreamExt;
+use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 use tauri::Manager;
 use tokio::fs as tokio_fs;
 use tokio::io::AsyncWriteExt;
@@ -50,6 +52,27 @@ struct SkillFile {
     canonical_name: String,
     content_hash: String,
     file_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MarketSkillRecord {
+    package_id: String,
+    repository: String,
+    name: String,
+    author: String,
+    downloads_label: String,
+    url: String,
+    description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rating_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MarketSkillDetail {
+    package_id: String,
+    readme: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,11 +122,50 @@ struct SyncEnabledSkillsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SkillLockEntry {
+    source_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_app_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_app_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_path: Option<String>,
+    canonical_name: String,
+    content_hash: String,
+    file_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillLockFile {
+    version: u32,
+    #[serde(default)]
+    skills: BTreeMap<String, SkillLockEntry>,
+}
+
+impl Default for SkillLockFile {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            skills: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GitSyncConfig {
     #[serde(default)]
     repo_url: String,
     #[serde(default = "default_git_branch")]
     branch: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SyncWorkspaceOptions {
+    remove_missing_entries: bool,
+    skip_source_local_only: bool,
+    preserve_target_local_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -171,10 +233,13 @@ struct GitHubRelease {
 
 const SYNC_MANIFEST_FILE: &str = ".skillbox-sync.json";
 const SYNC_ENABLED_SKILLS_FILE: &str = ".skillbox-enabled-skills.json";
+const SKILL_LOCK_FILE: &str = "skills-lock.json";
 const INTERNAL_GIT_REPO_DIR: &str = ".skillbox-git";
 const GITHUB_REPOSITORY: &str = "justwe-bot/SkillBox";
 const GITHUB_REPOSITORY_URL: &str = "https://github.com/justwe-bot/SkillBox";
 const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "skillbox://update-download-progress";
+const MARKET_TRENDING_URL: &str = "https://skills.sh/trending";
+const MAX_RECOMMENDED_MARKET_SKILLS: usize = 24;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScanPlatform {
@@ -819,19 +884,67 @@ fn parse_skill_metadata(content: &str, fallback_name: &str) -> ParsedSkillMetada
     let in_frontmatter = matches!(lines.next(), Some(line) if line.trim() == "---");
 
     if in_frontmatter {
+        let mut frontmatter_lines = Vec::new();
         for line in &mut lines {
             if line.trim() == "---" {
                 break;
             }
+            frontmatter_lines.push(line.to_string());
+        }
 
-            if let Some((key, value)) = line.split_once(':') {
-                let value = value.trim().trim_matches('"').trim_matches('\'');
-                match key.trim() {
-                    "name" if !value.is_empty() => name = Some(value.to_string()),
-                    "description" if !value.is_empty() => description = Some(value.to_string()),
+        let mut index = 0usize;
+        while index < frontmatter_lines.len() {
+            let line = &frontmatter_lines[index];
+
+            if let Some((key, raw_value)) = line.split_once(':') {
+                let key = key.trim();
+                let value = raw_value.trim().trim_matches('"').trim_matches('\'');
+
+                match key {
+                    "name" if !value.is_empty() && value != "|" && value != ">" => {
+                        name = Some(value.to_string());
+                    }
+                    "description" if !value.is_empty() && value != "|" && value != ">" => {
+                        description = Some(value.to_string());
+                    }
+                    "description" if value == "|" || value == ">" => {
+                        let mut block_lines = Vec::new();
+                        let mut next_index = index + 1;
+
+                        while next_index < frontmatter_lines.len() {
+                            let next_line = &frontmatter_lines[next_index];
+                            if next_line.trim().is_empty() {
+                                next_index += 1;
+                                continue;
+                            }
+
+                            let is_indented = next_line
+                                .chars()
+                                .next()
+                                .map(|ch| ch.is_whitespace())
+                                .unwrap_or(false);
+
+                            if !is_indented {
+                                break;
+                            }
+
+                            block_lines.push(next_line.trim().to_string());
+                            next_index += 1;
+                        }
+
+                        let normalized = block_lines.join(" ").trim().to_string();
+                        if !normalized.is_empty() {
+                            description = Some(normalized);
+                        }
+
+                        index = next_index;
+                        continue;
+                    }
                     _ => {}
                 }
             }
+
+            index += 1;
         }
     }
 
@@ -1151,6 +1264,80 @@ fn get_sync_enabled_skills_path(sync_dir: &Path) -> PathBuf {
     sync_dir.join(SYNC_ENABLED_SKILLS_FILE)
 }
 
+fn get_skill_lock_path(sync_dir: &Path) -> PathBuf {
+    sync_dir.join(SKILL_LOCK_FILE)
+}
+
+fn load_skill_lock(sync_dir: &Path) -> Result<SkillLockFile, String> {
+    let lock_path = get_skill_lock_path(sync_dir);
+    if !lock_path.exists() {
+        return Ok(SkillLockFile::default());
+    }
+
+    let content = fs::read_to_string(&lock_path).map_err(|e| e.to_string())?;
+    if let Ok(lock) = serde_json::from_str::<SkillLockFile>(&content) {
+        return Ok(lock);
+    }
+
+    if let Ok(skills) = serde_json::from_str::<BTreeMap<String, SkillLockEntry>>(&content) {
+        return Ok(SkillLockFile { version: 1, skills });
+    }
+
+    Err(format!(
+        "无法解析同步目录中的技能锁文件: {}",
+        lock_path.to_string_lossy()
+    ))
+}
+
+fn save_skill_lock(sync_dir: &Path, lock_file: &SkillLockFile) -> Result<(), String> {
+    fs::create_dir_all(sync_dir).map_err(|e| e.to_string())?;
+    let lock_path = get_skill_lock_path(sync_dir);
+    let content = serde_json::to_string_pretty(lock_file).map_err(|e| e.to_string())?;
+    fs::write(&lock_path, format!("{}\n", content)).map_err(|e| e.to_string())
+}
+
+fn resolve_sync_entry_name_for_path(sync_dir: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(sync_dir).ok()?;
+    sanitize_sync_entry_name(&relative.to_string_lossy()).ok()
+}
+
+fn rename_skill_lock_entry(
+    sync_dir: &Path,
+    old_path: &Path,
+    new_path: &Path,
+) -> Result<(), String> {
+    let Some(old_entry_name) = resolve_sync_entry_name_for_path(sync_dir, old_path) else {
+        return Ok(());
+    };
+    let Some(new_entry_name) = resolve_sync_entry_name_for_path(sync_dir, new_path) else {
+        return Ok(());
+    };
+
+    if old_entry_name == new_entry_name {
+        return Ok(());
+    }
+
+    let mut lock_file = load_skill_lock(sync_dir)?;
+    let Some(entry) = lock_file.skills.remove(&old_entry_name) else {
+        return Ok(());
+    };
+    lock_file.skills.insert(new_entry_name, entry);
+    save_skill_lock(sync_dir, &lock_file)
+}
+
+fn remove_skill_lock_entry(sync_dir: &Path, path: &Path) -> Result<(), String> {
+    let Some(entry_name) = resolve_sync_entry_name_for_path(sync_dir, path) else {
+        return Ok(());
+    };
+
+    let mut lock_file = load_skill_lock(sync_dir)?;
+    if lock_file.skills.remove(&entry_name).is_some() {
+        save_skill_lock(sync_dir, &lock_file)?;
+    }
+
+    Ok(())
+}
+
 fn load_sync_enabled_skills(
     sync_dir: &Path,
 ) -> Result<Option<HashMap<String, Vec<String>>>, String> {
@@ -1218,8 +1405,86 @@ fn remove_path_if_exists(path: &Path) -> Result<(), String> {
 fn should_skip_transfer_root_entry(name: &str) -> bool {
     matches!(
         name,
-        ".git" | ".DS_Store" | ".ckg" | ".mcp_gallery_cache" | INTERNAL_GIT_REPO_DIR
+        ".git"
+            | ".DS_Store"
+            | ".ckg"
+            | ".mcp_gallery_cache"
+            | INTERNAL_GIT_REPO_DIR
+            | SKILL_LOCK_FILE
     )
+}
+
+fn is_local_only_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+
+    if lower == ".env" {
+        return true;
+    }
+
+    if lower.starts_with(".env.")
+        && !matches!(
+            lower.as_str(),
+            ".env.example" | ".env.sample" | ".env.template" | ".env.default" | ".env.defaults"
+        )
+    {
+        return true;
+    }
+
+    if matches!(
+        lower.as_str(),
+        "secrets" | ".secrets" | "private" | ".private"
+    ) {
+        return true;
+    }
+
+    lower.ends_with(".local.json")
+        || lower.ends_with(".local.yaml")
+        || lower.ends_with(".local.yml")
+        || lower.ends_with(".local.toml")
+        || lower.ends_with(".local.env")
+}
+
+fn is_local_only_relative_path(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        std::path::Component::Normal(value) => is_local_only_name(&value.to_string_lossy()),
+        _ => false,
+    })
+}
+
+fn relative_copy_path(path: &Path, root: &Path) -> PathBuf {
+    if path == root {
+        return path
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(PathBuf::new);
+    }
+
+    path.strip_prefix(root).unwrap_or(path).to_path_buf()
+}
+
+fn build_swap_path(path: &Path, label: &str) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("entry");
+    let parent = path
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let mut attempt = 0usize;
+    loop {
+        let suffix = if attempt == 0 {
+            format!(".skillbox-{}-{}", label, file_name)
+        } else {
+            format!(".skillbox-{}-{}-{}", label, attempt, file_name)
+        };
+        let candidate = parent.join(suffix);
+        if !candidate.exists() {
+            return candidate;
+        }
+        attempt += 1;
+    }
 }
 
 fn list_transfer_entries(root: &Path) -> Result<Vec<String>, String> {
@@ -1329,6 +1594,22 @@ fn list_sync_dir_entries(sync_dir: &Path) -> Result<Vec<String>, String> {
 
     entries.sort_by_key(|value| value.to_lowercase());
     Ok(entries)
+}
+
+fn collect_sync_dir_skill_file_map(sync_dir: &Path) -> Result<HashMap<String, SkillFile>, String> {
+    let mut map = HashMap::new();
+
+    for skill in collect_skill_entries(sync_dir)? {
+        let skill_path = PathBuf::from(&skill.path);
+        let relative = match skill_path.strip_prefix(sync_dir) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let entry_name = sanitize_sync_entry_name(&relative.to_string_lossy())?;
+        map.entry(entry_name).or_insert(skill);
+    }
+
+    Ok(map)
 }
 
 fn collect_sync_dir_skills(sync_dir: &Path) -> Result<Vec<ManagedSkillEntry>, String> {
@@ -1670,16 +1951,13 @@ fn export_openclaw_skill_entry(
     ))
 }
 
-fn rebuild_managed_skill_dir(
+fn populate_managed_skill_dir(
     app_id: &str,
     sync_dir: &Path,
     enabled_entries: &[String],
-) -> Result<PathBuf, String> {
-    fs::create_dir_all(sync_dir).map_err(|e| e.to_string())?;
-
-    let managed_dir = resolve_managed_link_dir(app_id);
-    remove_path_if_exists(&managed_dir)?;
-    fs::create_dir_all(&managed_dir).map_err(|e| e.to_string())?;
+    managed_dir: &Path,
+) -> Result<(), String> {
+    fs::create_dir_all(managed_dir).map_err(|e| e.to_string())?;
     let mut exported_used_names = HashSet::new();
 
     for value in enabled_entries {
@@ -1693,7 +1971,7 @@ fn rebuild_managed_skill_dir(
             "kiro" | "copilot" => {
                 export_kiro_skill_entry(
                     &source,
-                    &managed_dir,
+                    managed_dir,
                     &entry_name,
                     &mut exported_used_names,
                 )?;
@@ -1701,7 +1979,7 @@ fn rebuild_managed_skill_dir(
             "openclaw" => {
                 export_openclaw_skill_entry(
                     &source,
-                    &managed_dir,
+                    managed_dir,
                     &entry_name,
                     &mut exported_used_names,
                 )?;
@@ -1711,6 +1989,55 @@ fn rebuild_managed_skill_dir(
                 create_symlink(&source, &target)?;
             }
         }
+    }
+
+    Ok(())
+}
+
+fn rebuild_managed_skill_dir(
+    app_id: &str,
+    sync_dir: &Path,
+    enabled_entries: &[String],
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(sync_dir).map_err(|e| e.to_string())?;
+
+    let managed_dir = resolve_managed_link_dir(app_id);
+    let next_managed_dir = build_swap_path(&managed_dir, "managed");
+    remove_path_if_exists(&next_managed_dir)?;
+    fs::create_dir_all(&next_managed_dir).map_err(|e| e.to_string())?;
+
+    if let Err(error) =
+        populate_managed_skill_dir(app_id, sync_dir, enabled_entries, &next_managed_dir)
+    {
+        let _ = remove_path_if_exists(&next_managed_dir);
+        return Err(error);
+    }
+
+    if managed_dir.exists() {
+        if let Err(error) = merge_local_only_paths(&managed_dir, &next_managed_dir, false) {
+            let _ = remove_path_if_exists(&next_managed_dir);
+            return Err(error);
+        }
+    }
+
+    let previous_managed_dir = if managed_dir.exists() {
+        let backup_dir = build_swap_path(&managed_dir, "managed-backup");
+        fs::rename(&managed_dir, &backup_dir).map_err(|e| e.to_string())?;
+        Some(backup_dir)
+    } else {
+        None
+    };
+
+    if let Err(error) = fs::rename(&next_managed_dir, &managed_dir) {
+        let _ = remove_path_if_exists(&next_managed_dir);
+        if let Some(previous_dir) = previous_managed_dir.as_ref() {
+            let _ = fs::rename(previous_dir, &managed_dir);
+        }
+        return Err(error.to_string());
+    }
+
+    if let Some(previous_dir) = previous_managed_dir {
+        let _ = remove_path_if_exists(&previous_dir);
     }
 
     Ok(managed_dir)
@@ -1883,7 +2210,14 @@ fn run_git(repo_path: &Path, args: &[&str]) -> Result<String, String> {
         .args(args)
         .current_dir(&safe_working_dir)
         .output()
-        .map_err(|e| format!("Failed to run git -C {} {}: {}", repo_path.display(), args.join(" "), e))?;
+        .map_err(|e| {
+            format!(
+                "Failed to run git -C {} {}: {}",
+                repo_path.display(),
+                args.join(" "),
+                e
+            )
+        })?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -1891,7 +2225,12 @@ fn run_git(repo_path: &Path, args: &[&str]) -> Result<String, String> {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let message = if stderr.is_empty() { stdout } else { stderr };
-        Err(format!("git -C {} {} failed: {}", repo_path.display(), args.join(" "), message))
+        Err(format!(
+            "git -C {} {} failed: {}",
+            repo_path.display(),
+            args.join(" "),
+            message
+        ))
     }
 }
 
@@ -1975,6 +2314,121 @@ fn copy_path_recursive(source: &Path, target: &Path) -> Result<(), String> {
     }
 }
 
+fn copy_path_recursive_without_local_only(
+    source: &Path,
+    target: &Path,
+    root: &Path,
+) -> Result<(), String> {
+    let relative = relative_copy_path(source, root);
+    if !relative.as_os_str().is_empty() && is_local_only_relative_path(&relative) {
+        return Ok(());
+    }
+
+    if source.is_dir() {
+        fs::create_dir_all(target).map_err(|e| e.to_string())?;
+
+        for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let child_source = entry.path();
+            let child_target = target.join(entry.file_name());
+            copy_path_recursive_without_local_only(&child_source, &child_target, root)?;
+        }
+
+        return Ok(());
+    }
+
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    fs::copy(source, target).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn copy_entry(source: &Path, target: &Path, skip_local_only: bool) -> Result<(), String> {
+    if skip_local_only {
+        copy_path_recursive_without_local_only(source, target, source)
+    } else {
+        copy_path_recursive(source, target)
+    }
+}
+
+fn merge_local_only_paths(
+    source_root: &Path,
+    target_root: &Path,
+    overwrite_existing: bool,
+) -> Result<(), String> {
+    if !source_root.exists() {
+        return Ok(());
+    }
+
+    for entry in WalkDir::new(source_root)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let relative = match entry.path().strip_prefix(source_root) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        if relative.as_os_str().is_empty() || !is_local_only_relative_path(relative) {
+            continue;
+        }
+
+        let target = target_root.join(relative);
+        if target.exists() && !overwrite_existing {
+            continue;
+        }
+
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+
+        fs::copy(entry.path(), &target).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn replace_entry_for_sync(
+    source: &Path,
+    target: &Path,
+    skip_source_local_only: bool,
+    preserve_target_local_only: bool,
+) -> Result<(), String> {
+    if !target.exists() {
+        return copy_entry(source, target, skip_source_local_only);
+    }
+
+    if !preserve_target_local_only {
+        remove_path_if_exists(target)?;
+        return copy_entry(source, target, skip_source_local_only);
+    }
+
+    let preserved_target = build_swap_path(target, "preserve");
+    fs::rename(target, &preserved_target).map_err(|e| e.to_string())?;
+
+    if let Err(error) = copy_entry(source, target, skip_source_local_only) {
+        let _ = remove_path_if_exists(target);
+        let _ = fs::rename(&preserved_target, target);
+        return Err(error);
+    }
+
+    if let Err(error) = merge_local_only_paths(&preserved_target, target, false) {
+        let _ = remove_path_if_exists(target);
+        let _ = fs::rename(&preserved_target, target);
+        return Err(error);
+    }
+
+    remove_path_if_exists(&preserved_target)?;
+    Ok(())
+}
+
 fn prune_empty_parent_dirs(root: &Path, path: &Path) -> Result<(), String> {
     let mut current = path.parent();
 
@@ -2028,7 +2482,7 @@ fn sync_metadata_file(
 fn sync_skill_workspace(
     source_root: &Path,
     target_root: &Path,
-    remove_missing_entries: bool,
+    options: SyncWorkspaceOptions,
 ) -> Result<(), String> {
     fs::create_dir_all(source_root).map_err(|e| e.to_string())?;
     fs::create_dir_all(target_root).map_err(|e| e.to_string())?;
@@ -2036,7 +2490,7 @@ fn sync_skill_workspace(
     let source_entries = list_transfer_entries(source_root)?;
     let source_entry_set: HashSet<String> = source_entries.iter().cloned().collect();
 
-    if remove_missing_entries {
+    if options.remove_missing_entries {
         for target_entry in list_transfer_entries(target_root)? {
             if source_entry_set.contains(&target_entry) {
                 continue;
@@ -2051,8 +2505,12 @@ fn sync_skill_workspace(
     for entry_name in &source_entries {
         let source = source_root.join(entry_name);
         let target = target_root.join(entry_name);
-        remove_path_if_exists(&target)?;
-        copy_path_recursive(&source, &target)?;
+        replace_entry_for_sync(
+            &source,
+            &target,
+            options.skip_source_local_only,
+            options.preserve_target_local_only,
+        )?;
     }
 
     save_sync_manifest(target_root, &source_entries)?;
@@ -2060,7 +2518,13 @@ fn sync_skill_workspace(
         source_root,
         target_root,
         SYNC_ENABLED_SKILLS_FILE,
-        remove_missing_entries,
+        options.remove_missing_entries,
+    )?;
+    sync_metadata_file(
+        source_root,
+        target_root,
+        SKILL_LOCK_FILE,
+        options.remove_missing_entries,
     )?;
 
     Ok(())
@@ -2070,6 +2534,30 @@ fn save_sync_manifest(repo_path: &Path, entries: &[String]) -> Result<(), String
     let manifest_path = repo_path.join(SYNC_MANIFEST_FILE);
     let content = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
     fs::write(manifest_path, content).map_err(|e| e.to_string())
+}
+
+fn build_app_skill_lock_entry(app: &SkillApp, skill: &SkillFile) -> SkillLockEntry {
+    SkillLockEntry {
+        source_type: "app".to_string(),
+        source_app_id: Some(app.id.clone()),
+        source_app_name: Some(app.name.clone()),
+        source_path: Some(skill.path.clone()),
+        canonical_name: skill.canonical_name.clone(),
+        content_hash: skill.content_hash.clone(),
+        file_count: skill.file_count,
+    }
+}
+
+fn build_unknown_skill_lock_entry(skill: &SkillFile) -> SkillLockEntry {
+    SkillLockEntry {
+        source_type: "unknown".to_string(),
+        source_app_id: None,
+        source_app_name: None,
+        source_path: Some(skill.path.clone()),
+        canonical_name: skill.canonical_name.clone(),
+        content_hash: skill.content_hash.clone(),
+        file_count: skill.file_count,
+    }
 }
 
 fn get_skill_base_name(skill: &SkillFile) -> String {
@@ -2202,25 +2690,29 @@ fn clone_remote_snapshot(
     let progress_handle = app_handle.cloned();
     let mut cmd = Command::new("git");
     cmd.args([
-            "clone",
-            "--progress",
-            "--depth",
-            "1",
-            "--branch",
-            &branch,
-            "--single-branch",
-            git_config.repo_url.trim(),
-            &repo_path_string,
-        ])
-        .current_dir(&safe_working_dir)
-        .env("GIT_FLUSH", "1")
-        .env("GIT_PROGRESS_DELAY", "1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        "clone",
+        "--progress",
+        "--depth",
+        "1",
+        "--branch",
+        &branch,
+        "--single-branch",
+        git_config.repo_url.trim(),
+        &repo_path_string,
+    ])
+    .current_dir(&safe_working_dir)
+    .env("GIT_FLUSH", "1")
+    .env("GIT_PROGRESS_DELAY", "1")
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn git clone {}: {}", git_config.repo_url.trim(), e))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        format!(
+            "Failed to spawn git clone {}: {}",
+            git_config.repo_url.trim(),
+            e
+        )
+    })?;
 
     let stdout = child.stdout.take().expect("stdout pipe");
     let stderr = child.stderr.take().expect("stderr pipe");
@@ -2295,7 +2787,15 @@ fn pull_remote_snapshot_into_sync_dir(
         clone_remote_snapshot(repo, &app_config.git_config, app_handle)?;
 
         emit_git_log(app_handle, "同步工作区...");
-        sync_skill_workspace(repo, sync_dir, true)?;
+        sync_skill_workspace(
+            repo,
+            sync_dir,
+            SyncWorkspaceOptions {
+                remove_missing_entries: true,
+                skip_source_local_only: true,
+                preserve_target_local_only: true,
+            },
+        )?;
 
         if rebuild_links {
             emit_git_log(app_handle, "重建应用链接...");
@@ -2317,7 +2817,15 @@ fn pull_remote_snapshot_into_sync_dir(
 fn push_sync_dir_snapshot(sync_dir: &Path, app_config: &AppConfig) -> Result<(), String> {
     with_fresh_internal_git_repo(sync_dir, |repo| {
         initialize_temp_push_repo(repo, &app_config.git_config)?;
-        sync_skill_workspace(sync_dir, repo, true)?;
+        sync_skill_workspace(
+            sync_dir,
+            repo,
+            SyncWorkspaceOptions {
+                remove_missing_entries: true,
+                skip_source_local_only: true,
+                preserve_target_local_only: false,
+            },
+        )?;
 
         if !commit_repo_changes(repo)? {
             run_git(repo, &["commit", "--allow-empty", "-m", "Sync AI skills"])?;
@@ -2427,6 +2935,470 @@ fn sanitize_skill_name(value: &str) -> Result<String, String> {
     }
 
     Ok(trimmed.to_string())
+}
+
+fn strip_ansi_sequences(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            if matches!(chars.peek(), Some('[')) {
+                let _ = chars.next();
+                while let Some(next) = chars.next() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+
+        result.push(ch);
+    }
+
+    result
+}
+
+fn command_exists(binary: &str) -> bool {
+    Command::new(binary)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn run_skills_cli(args: &[String], cwd: Option<&Path>) -> Result<String, String> {
+    let mut command = if command_exists("skills") {
+        let mut command = Command::new("skills");
+        command.args(args);
+        command
+    } else if command_exists("npx") {
+        let mut command = Command::new("npx");
+        command.arg("--yes").arg("skills").args(args);
+        command
+    } else {
+        return Err("当前系统未检测到 `skills` 或 `npx` 命令，无法使用技能市场。".to_string());
+    };
+
+    if let Some(path) = cwd {
+        command.current_dir(path);
+    }
+
+    let output = command
+        .output()
+        .map_err(|error| format!("运行 skills 命令失败: {}", error))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let merged = if stderr.trim().is_empty() {
+        stdout.to_string()
+    } else if stdout.trim().is_empty() {
+        stderr.to_string()
+    } else {
+        format!("{}\n{}", stdout, stderr)
+    };
+    let cleaned = strip_ansi_sequences(&merged);
+
+    if output.status.success() {
+        Ok(cleaned)
+    } else {
+        Err(cleaned.trim().to_string())
+    }
+}
+
+fn parse_market_package_id(package_id: &str) -> Result<(String, String, String), String> {
+    let (repository, skill_name) = package_id
+        .trim()
+        .rsplit_once('@')
+        .ok_or_else(|| format!("无效的技能包标识: {}", package_id))?;
+
+    if repository.trim().is_empty() || skill_name.trim().is_empty() {
+        return Err(format!("无效的技能包标识: {}", package_id));
+    }
+
+    let author = repository
+        .split('/')
+        .next()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(repository)
+        .to_string();
+
+    Ok((
+        repository.trim().to_string(),
+        skill_name.trim().to_string(),
+        author,
+    ))
+}
+
+fn parse_market_search_results(output: &str) -> Vec<MarketSkillRecord> {
+    let mut results = Vec::new();
+    let mut pending_package: Option<(String, String)> = None;
+
+    for raw_line in output.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if line.ends_with(" installs") {
+            let without_suffix = line.trim_end_matches(" installs").trim();
+            if let Some((package_id, downloads)) = without_suffix.rsplit_once(' ') {
+                if package_id.contains('@') && package_id.contains('/') {
+                    pending_package = Some((
+                        package_id.trim().to_string(),
+                        format!("{} installs", downloads.trim()),
+                    ));
+                    continue;
+                }
+            }
+        }
+
+        if let Some((package_id, downloads_label)) = pending_package.take() {
+            let url = if line.starts_with('└') {
+                line.trim_start_matches('└').trim().to_string()
+            } else {
+                String::new()
+            };
+
+            if let Ok((repository, skill_name, author)) = parse_market_package_id(&package_id) {
+                results.push(MarketSkillRecord {
+                    package_id,
+                    repository: repository.clone(),
+                    name: skill_name,
+                    author,
+                    downloads_label,
+                    url,
+                    description: format!("来源仓库: {}", repository),
+                    rating_label: None,
+                });
+            }
+        }
+    }
+
+    results
+}
+
+fn normalize_market_text(content: &str) -> String {
+    content.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn parse_recommended_market_skills_html(html: &str) -> Vec<MarketSkillRecord> {
+    let document = Html::parse_document(html);
+    let anchor_selector = Selector::parse("a[href]").expect("valid anchor selector");
+    let name_selector = Selector::parse("h3").expect("valid name selector");
+    let span_selector = Selector::parse("span").expect("valid span selector");
+    let mut seen_package_ids = HashSet::new();
+    let mut results = Vec::new();
+
+    for anchor in document.select(&anchor_selector) {
+        let Some(href) = anchor.value().attr("href") else {
+            continue;
+        };
+        if !href.starts_with('/') {
+            continue;
+        }
+
+        let segments: Vec<&str> = href.trim_start_matches('/').split('/').collect();
+        if segments.len() != 3 || segments.iter().any(|segment| segment.trim().is_empty()) {
+            continue;
+        }
+
+        let repository = format!("{}/{}", segments[0].trim(), segments[1].trim());
+        let skill_name = segments[2].trim().to_string();
+        let package_id = format!("{}@{}", repository, skill_name);
+        if !seen_package_ids.insert(package_id.clone()) {
+            continue;
+        }
+
+        let name = anchor
+            .select(&name_selector)
+            .next()
+            .map(|node| normalize_market_text(&node.text().collect::<Vec<_>>().join(" ")))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| skill_name.clone());
+
+        let downloads_value = anchor
+            .select(&span_selector)
+            .filter_map(|node| {
+                let value = normalize_market_text(&node.text().collect::<Vec<_>>().join(" "));
+                if value.is_empty() {
+                    None
+                } else {
+                    Some(value)
+                }
+            })
+            .last();
+
+        let Some(downloads_value) = downloads_value else {
+            continue;
+        };
+
+        results.push(MarketSkillRecord {
+            package_id,
+            repository,
+            name,
+            author: segments[0].trim().to_string(),
+            downloads_label: format!("{} installs", downloads_value),
+            url: format!("https://skills.sh{}", href),
+            description: String::new(),
+            rating_label: None,
+        });
+
+        if results.len() >= MAX_RECOMMENDED_MARKET_SKILLS {
+            break;
+        }
+    }
+
+    results
+}
+
+fn create_market_temp_dir(skill_name: &str, purpose: &str) -> Result<PathBuf, String> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "skillbox-market-{}-{}-{}",
+        purpose,
+        skill_name,
+        chrono::Utc::now().timestamp_millis()
+    ));
+    fs::create_dir_all(&temp_dir).map_err(|error| error.to_string())?;
+    Ok(temp_dir)
+}
+
+fn install_market_skill_into_temp(
+    repository: &str,
+    skill_name: &str,
+    temp_dir: &Path,
+) -> Result<PathBuf, String> {
+    fs::write(
+        temp_dir.join("package.json"),
+        "{\n  \"name\": \"skillbox-market-install\",\n  \"private\": true\n}\n",
+    )
+    .map_err(|error| format!("创建临时安装目录失败: {}", error))?;
+
+    run_skills_cli(
+        &vec![
+            "add".to_string(),
+            repository.to_string(),
+            "--skill".to_string(),
+            skill_name.to_string(),
+            "--copy".to_string(),
+            "-y".to_string(),
+        ],
+        Some(temp_dir),
+    )?;
+
+    [
+        temp_dir.join("skills").join(skill_name),
+        temp_dir.join(".agents").join("skills").join(skill_name),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
+    .ok_or_else(|| format!("未找到安装后的技能目录：{}", skill_name))
+}
+
+fn strip_markdown_frontmatter(content: &str) -> String {
+    let trimmed = content.trim_start_matches('\u{feff}').trim();
+    let mut lines = trimmed.lines();
+    if !matches!(lines.next().map(|line| line.trim()), Some("---")) {
+        return trimmed.to_string();
+    }
+
+    let all_lines: Vec<&str> = trimmed.lines().collect();
+    for index in 1..all_lines.len() {
+        if all_lines[index].trim() == "---" {
+            return all_lines[index + 1..].join("\n").trim().to_string();
+        }
+    }
+
+    trimmed.to_string()
+}
+
+fn load_market_skill_readme(skill_dir: &Path) -> Result<String, String> {
+    let candidates = [
+        skill_dir.join("SKILL.md"),
+        skill_dir.join("README.md"),
+        skill_dir.join("skill.md"),
+    ];
+
+    for candidate in candidates {
+        if candidate.exists() {
+            let content = fs::read_to_string(&candidate)
+                .map_err(|error| format!("读取技能说明失败: {}", error))?;
+            let normalized = strip_markdown_frontmatter(&content);
+            if !normalized.trim().is_empty() {
+                return Ok(normalized);
+            }
+        }
+    }
+
+    let markdown_file = WalkDir::new(skill_dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry.file_type().is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .map(|value| value.eq_ignore_ascii_case("md"))
+                    .unwrap_or(false)
+        })
+        .map(|entry| entry.into_path());
+
+    if let Some(path) = markdown_file {
+        let content =
+            fs::read_to_string(&path).map_err(|error| format!("读取技能说明失败: {}", error))?;
+        let normalized = strip_markdown_frontmatter(&content);
+        if !normalized.trim().is_empty() {
+            return Ok(normalized);
+        }
+    }
+
+    Err("当前技能没有可显示的 README / SKILL.md".to_string())
+}
+
+fn refresh_sync_dir_metadata(sync_dir: &Path, config: &AppConfig) -> Result<(), String> {
+    let mut entries = list_sync_dir_entries(sync_dir)?;
+    entries.sort();
+    entries.dedup();
+    save_sync_manifest(sync_dir, &entries)?;
+
+    let mut next_lock = load_skill_lock(sync_dir)?;
+    let skill_files = collect_sync_dir_skill_file_map(sync_dir)?;
+    next_lock.skills.clear();
+    for (entry_name, skill) in &skill_files {
+        next_lock
+            .skills
+            .insert(entry_name.clone(), build_unknown_skill_lock_entry(skill));
+    }
+    save_skill_lock(sync_dir, &next_lock)?;
+
+    let effective_enabled_skills = load_effective_enabled_skills(config, sync_dir)?;
+    save_sync_enabled_skills(sync_dir, &effective_enabled_skills)?;
+    rebuild_managed_links_for_all_apps(config)?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn search_skill_market(query: String) -> Result<Vec<MarketSkillRecord>, String> {
+    tokio::task::spawn_blocking(move || {
+        let trimmed_query = query.trim().to_string();
+        if trimmed_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let output = run_skills_cli(&vec!["find".to_string(), trimmed_query.clone()], None)?;
+        if output.contains(&format!("No skills found for \"{}\"", trimmed_query)) {
+            return Ok(Vec::new());
+        }
+
+        Ok(parse_market_search_results(&output))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_recommended_market_skills() -> Result<Vec<MarketSkillRecord>, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(format!("SkillBox/{}", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| format!("创建 skills.sh 客户端失败: {}", error))?;
+
+    let response = client
+        .get(MARKET_TRENDING_URL)
+        .header(
+            reqwest::header::ACCEPT,
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
+        .send()
+        .await
+        .map_err(|error| format!("请求 skills.sh Trending 失败: {}", error))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "skills.sh Trending 返回异常状态: {}",
+            response.status()
+        ));
+    }
+
+    let html = response
+        .text()
+        .await
+        .map_err(|error| format!("读取 skills.sh Trending 响应失败: {}", error))?;
+    let skills = parse_recommended_market_skills_html(&html);
+    if skills.is_empty() {
+        return Err("未能从 skills.sh Trending (24h) 页面解析到技能列表".to_string());
+    }
+
+    Ok(skills)
+}
+
+#[tauri::command]
+async fn get_market_skill_detail(package_id: String) -> Result<MarketSkillDetail, String> {
+    tokio::task::spawn_blocking(move || {
+        let (repository, skill_name, _) = parse_market_package_id(&package_id)?;
+        let temp_dir = create_market_temp_dir(&skill_name, "detail")?;
+
+        let detail_result = (|| -> Result<MarketSkillDetail, String> {
+            let skill_dir = install_market_skill_into_temp(&repository, &skill_name, &temp_dir)?;
+            let readme = load_market_skill_readme(&skill_dir)?;
+
+            Ok(MarketSkillDetail {
+                package_id: package_id.clone(),
+                readme,
+            })
+        })();
+
+        let _ = fs::remove_dir_all(&temp_dir);
+        detail_result
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn install_skill_market_internal(repo_path: String, package_id: String) -> Result<String, String> {
+    let trimmed_repo_path = repo_path.trim();
+    if trimmed_repo_path.is_empty() {
+        return Err("请先选择本地同步目录".to_string());
+    }
+
+    let sync_dir = PathBuf::from(trimmed_repo_path);
+    probe_directory_access(&sync_dir)?;
+    fs::create_dir_all(&sync_dir).map_err(|error| error.to_string())?;
+
+    let (repository, skill_name, _) = parse_market_package_id(&package_id)?;
+    let target_path = sync_dir.join(&skill_name);
+    if target_path.exists() {
+        return Err(format!("本地同步目录中已存在技能：{}", skill_name));
+    }
+
+    let temp_dir = create_market_temp_dir(&skill_name, "install")?;
+
+    let cleanup_result = (|| -> Result<String, String> {
+        let source_path = install_market_skill_into_temp(&repository, &skill_name, &temp_dir)?;
+
+        copy_path_recursive(&source_path, &target_path)?;
+
+        let config = load_config();
+        refresh_sync_dir_metadata(&sync_dir, &config)?;
+
+        Ok(skill_name.clone())
+    })();
+
+    let _ = fs::remove_dir_all(&temp_dir);
+    cleanup_result.map(|installed_name| format!("已安装 {} 到本地同步目录", installed_name))
+}
+
+#[tauri::command]
+async fn install_skill_market(repo_path: String, package_id: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || install_skill_market_internal(repo_path, package_id))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 fn is_launchable_target(path: &Path) -> bool {
@@ -2804,6 +3776,7 @@ fn rename_skill(skill_path: String, new_name: String) -> Result<String, String> 
     {
         let sync_dir = PathBuf::from(git_path.trim());
         if target.starts_with(&sync_dir) || source.starts_with(&sync_dir) {
+            rename_skill_lock_entry(&sync_dir, &source, &target)?;
             rebuild_managed_links_for_all_apps(&config)?;
         }
     }
@@ -2831,6 +3804,7 @@ fn delete_skill(skill_path: String) -> Result<(), String> {
             {
                 let sync_dir = PathBuf::from(git_path.trim());
                 if target.starts_with(&sync_dir) {
+                    remove_skill_lock_entry(&sync_dir, &target)?;
                     rebuild_managed_links_for_all_apps(&config)?;
                 }
             }
@@ -2853,6 +3827,7 @@ fn delete_skill(skill_path: String) -> Result<(), String> {
         {
             let sync_dir = PathBuf::from(git_path.trim());
             if target.starts_with(&sync_dir) {
+                remove_skill_lock_entry(&sync_dir, &target)?;
                 rebuild_managed_links_for_all_apps(&config)?;
             }
         }
@@ -2899,10 +3874,15 @@ fn sync_to_git_internal(repo_path: &str) -> Result<(), String> {
     let config = load_config();
     let apps = scan_apps().map_err(|e| e)?;
     let repo_real = repo.canonicalize().unwrap_or(repo.clone());
+    let existing_lock = load_skill_lock(&repo)?;
 
     let mut written_entries = Vec::new();
     let mut used_names = std::collections::HashSet::new();
     let mut seen_skill_dirs = std::collections::HashSet::new();
+    let mut next_lock = SkillLockFile {
+        version: existing_lock.version.max(1),
+        skills: BTreeMap::new(),
+    };
 
     // 收集同步目录中已有的技能名称
     if let Ok(existing_entries) = fs::read_dir(&repo) {
@@ -2912,8 +3892,12 @@ fn sync_to_git_internal(repo_path: &str) -> Result<(), String> {
             if !name.starts_with('.')
                 && name != SYNC_MANIFEST_FILE
                 && name != SYNC_ENABLED_SKILLS_FILE
+                && name != SKILL_LOCK_FILE
             {
-                used_names.insert(name);
+                used_names.insert(name.clone());
+                if let Some(lock_entry) = existing_lock.skills.get(&name) {
+                    next_lock.skills.insert(name, lock_entry.clone());
+                }
             }
         }
     }
@@ -2957,7 +3941,11 @@ fn sync_to_git_internal(repo_path: &str) -> Result<(), String> {
                     if used_names.contains(&base_name) {
                         let existing_target = repo.join(&base_name);
                         if existing_target.exists() {
-                            written_entries.push(base_name);
+                            written_entries.push(base_name.clone());
+                            next_lock
+                                .skills
+                                .entry(base_name)
+                                .or_insert_with(|| build_app_skill_lock_entry(&app, &skill));
                             continue;
                         }
                     }
@@ -2970,8 +3958,11 @@ fn sync_to_git_internal(repo_path: &str) -> Result<(), String> {
                         continue;
                     }
 
-                    copy_path_recursive(&source, &target)?;
-                    written_entries.push(flat_name);
+                    copy_entry(&source, &target, true)?;
+                    written_entries.push(flat_name.clone());
+                    next_lock
+                        .skills
+                        .insert(flat_name, build_app_skill_lock_entry(&app, &skill));
                 }
             }
         }
@@ -2984,9 +3975,26 @@ fn sync_to_git_internal(repo_path: &str) -> Result<(), String> {
 
     written_entries.sort();
     written_entries.dedup();
+    let final_entry_set: HashSet<String> = written_entries.iter().cloned().collect();
+    let final_skill_files = collect_sync_dir_skill_file_map(&repo)?;
+    for entry_name in &written_entries {
+        if next_lock.skills.contains_key(entry_name) {
+            continue;
+        }
+        if let Some(skill) = final_skill_files.get(entry_name) {
+            next_lock
+                .skills
+                .insert(entry_name.clone(), build_unknown_skill_lock_entry(skill));
+        }
+    }
+    next_lock
+        .skills
+        .retain(|entry_name, _| final_entry_set.contains(entry_name));
+
     save_sync_manifest(&repo, &written_entries)?;
     let effective_enabled_skills = load_effective_enabled_skills(&config, &repo)?;
     save_sync_enabled_skills(&repo, &effective_enabled_skills)?;
+    save_skill_lock(&repo, &next_lock)?;
     rebuild_managed_links_for_all_apps(&config)?;
 
     Ok(())
@@ -3126,6 +4134,22 @@ fn unlink_app(app_id: String) -> Result<(), String> {
     let skill_dir = PathBuf::from(&skill_path);
     let backup_dir = get_backup_path(&skill_dir);
     let managed_dir = resolve_managed_link_dir(&app_id);
+    let linked_target = if skill_dir.exists() {
+        fs::symlink_metadata(&skill_dir)
+            .ok()
+            .filter(|metadata| metadata.file_type().is_symlink())
+            .and_then(|_| resolve_link_target(&skill_dir))
+    } else {
+        None
+    };
+
+    if backup_dir.exists() && !backup_dir.is_file() {
+        if managed_dir.exists() {
+            merge_local_only_paths(&managed_dir, &backup_dir, true)?;
+        } else if let Some(target) = linked_target.as_ref() {
+            merge_local_only_paths(target, &backup_dir, true)?;
+        }
+    }
 
     if skill_dir.exists() {
         if let Ok(metadata) = fs::symlink_metadata(&skill_dir) {
@@ -3670,6 +4694,10 @@ fn main() {
             scan_apps,
             scan_skills,
             scan_git_path_skills,
+            search_skill_market,
+            get_recommended_market_skills,
+            get_market_skill_detail,
+            install_skill_market,
             get_app_enabled_skills,
             save_app_enabled_skills,
             rename_skill,

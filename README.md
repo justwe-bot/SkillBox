@@ -56,6 +56,8 @@ xattr -dr com.apple.quarantine /Applications/SkillBox.app
 
 **配置同步**：每个应用的技能启用状态会写入同步目录下的 `.skillbox-enabled-skills.json`，因此也会跟随 Git 一起推送和拉取。拉取到新的配置后，SkillBox 会按该文件自动重建各应用的启用状态。
 
+**技能锁文件**：同步目录下会生成 `skills-lock.json`，用于记录每个已汇总技能的来源信息（来源应用、来源路径）以及内容指纹（如 `contentHash`、`canonicalName`、`fileCount`），便于跨设备复现和排查来源。该文件会跟随 Git 一起推送和拉取。
+
 **取消软链接**：点击"取消链接"会删除软链接并恢复原始目录结构，原有技能目录备份会被还原。
 
 **兼容旧链接**：如果之前已经是“整目录直连”的旧模式，首次保存技能开关时会自动迁移到新的按技能启用模式。

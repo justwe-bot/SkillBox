@@ -4,10 +4,11 @@ import { Link } from 'react-router-dom'
 import { open as openDialog } from '@tauri-apps/api/dialog'
 import { listen } from '@tauri-apps/api/event'
 import { open as openExternal } from '@tauri-apps/api/shell'
-import { Archive, BookOpen, FolderOpen, FolderPlus, RefreshCw, Scan, Search, Settings } from 'lucide-react'
+import { Archive, BookOpen, Download, FolderOpen, FolderPlus, RefreshCw, Scan, Search, Settings, Star, Trash2 } from 'lucide-react'
 import { ApplicationCard } from '../components/ApplicationCard'
 import { FigmaSkillIcon } from '../components/FigmaSkillIcon'
 import { GitPanel } from '../components/GitPanel'
+import { MarketSkillDetailModal } from '../components/MarketSkillDetailModal'
 import { Modal } from '../components/Modal'
 import { SkillItem } from '../components/SkillItem'
 import { ThemeToggle } from '../components/ThemeToggle'
@@ -19,10 +20,13 @@ import {
   addCustomApp,
   deleteSkill,
   getAppEnabledSkills,
+  getMarketSkillDetail,
+  getRecommendedMarketSkills,
   getGitConfig,
   gitPull,
   gitPush,
   gitSync,
+  installSkillMarket,
   linkApp,
   scanGitPathSkills,
   launchApp,
@@ -34,13 +38,14 @@ import {
   saveGitPath,
   scanApps,
   scanSkills,
+  searchSkillMarket,
   setCustomPath,
   syncToGit,
   unlinkApp,
 } from '../lib/tauri'
-import type { AppRecord, BackendSkillFile, GitSyncConfig, ManagedSkillEntry, SkillRecord } from '../types'
+import type { AppRecord, BackendSkillFile, GitSyncConfig, ManagedSkillEntry, MarketSkillDetail, MarketSkillRecord, SkillRecord } from '../types'
 
-type TabKey = 'applications' | 'skills'
+type TabKey = 'applications' | 'skills' | 'market'
 type GitBusyAction = 'saveConfig' | 'push' | 'pull' | 'sync' | 'aggregate' | 'pickPath' | 'changePath' | null
 type ConfirmableGitAction = 'push' | 'pull' | 'sync' | 'aggregate'
 type SkillScanProgress = {
@@ -52,6 +57,7 @@ type LinkBusyState = {
   action: 'link' | 'unlink'
   appName: string
 }
+type MarketBusyAction = 'install' | 'remove' | null
 
 type GitTransferPhase = 'receivingObjects' | 'resolvingDeltas' | 'filteringContent' | 'updatingFiles'
 type GitProtectedFolderKey = 'documents' | 'desktop' | 'downloads'
@@ -96,7 +102,10 @@ function loadDashboardSnapshot(): DashboardSnapshot | null {
     }
 
     return {
-      activeTab: parsed.activeTab === 'skills' ? 'skills' : 'applications',
+      activeTab:
+        parsed.activeTab === 'skills' || parsed.activeTab === 'market'
+          ? parsed.activeTab
+          : 'applications',
       apps: parsed.apps,
       skills: parsed.skills,
       gitPath: parsed.gitPath ?? '',
@@ -258,6 +267,21 @@ export default function DashboardPage() {
   const [deleteModalOpen, setDeleteModalOpen] = useState(false)
   const [renameValue, setRenameValue] = useState('')
   const [skillBusy, setSkillBusy] = useState(false)
+  const [marketQuery, setMarketQuery] = useState('')
+  const [marketResults, setMarketResults] = useState<MarketSkillRecord[]>([])
+  const [marketLoading, setMarketLoading] = useState(false)
+  const [marketSearched, setMarketSearched] = useState(false)
+  const [recommendedMarketSkills, setRecommendedMarketSkills] = useState<MarketSkillRecord[]>([])
+  const [recommendedMarketLoading, setRecommendedMarketLoading] = useState(false)
+  const [recommendedMarketInitialized, setRecommendedMarketInitialized] = useState(false)
+  const [recommendedMarketError, setRecommendedMarketError] = useState<string | null>(null)
+  const [marketBusyPackageId, setMarketBusyPackageId] = useState<string | null>(null)
+  const [marketBusyAction, setMarketBusyAction] = useState<MarketBusyAction>(null)
+  const [selectedMarketSkill, setSelectedMarketSkill] = useState<MarketSkillRecord | null>(null)
+  const [marketDetailOpen, setMarketDetailOpen] = useState(false)
+  const [marketDetailLoading, setMarketDetailLoading] = useState(false)
+  const [marketDetailError, setMarketDetailError] = useState<string | null>(null)
+  const [marketDetail, setMarketDetail] = useState<MarketSkillDetail | null>(null)
   const [manageSkillsOpen, setManageSkillsOpen] = useState(false)
   const [manageSkillsApp, setManageSkillsApp] = useState<AppRecord | null>(null)
   const [manageSkillsLinkMode, setManageSkillsLinkMode] = useState<'legacy' | 'managed' | null>(null)
@@ -279,6 +303,7 @@ export default function DashboardPage() {
   const syncAreaRef = useRef<HTMLDivElement | null>(null)
   const gitPanelRef = useRef<HTMLDivElement | null>(null)
   const highlightTimerRef = useRef<number | null>(null)
+  const marketDetailCacheRef = useRef<Map<string, MarketSkillDetail>>(new Map())
 
   async function openMacFilesAndFoldersSettings() {
     try {
@@ -487,6 +512,29 @@ export default function DashboardPage() {
     saveDashboardSnapshot(snapshot)
   }, [activeTab, apps, gitConfig, gitPath, search, skills])
 
+  useEffect(() => {
+    if (activeTab !== 'market' || marketQuery.trim() || recommendedMarketInitialized || recommendedMarketLoading) {
+      return
+    }
+
+    void (async () => {
+      setRecommendedMarketLoading(true)
+      setRecommendedMarketError(null)
+      try {
+        const results = await getRecommendedMarketSkills()
+        setRecommendedMarketSkills(results)
+      } catch (error) {
+        const message = t('dashboard.market.recommendedFailed', { error: String(error) })
+        setRecommendedMarketSkills([])
+        setRecommendedMarketError(message)
+        notify(message, 'error')
+      } finally {
+        setRecommendedMarketLoading(false)
+        setRecommendedMarketInitialized(true)
+      }
+    })()
+  }, [activeTab, marketQuery, notify, recommendedMarketInitialized, recommendedMarketLoading, t])
+
   const filteredSkills = useMemo(() => {
     const normalizedSkills = [...skills].sort((left, right) => left.name.localeCompare(right.name, language))
 
@@ -517,6 +565,20 @@ export default function DashboardPage() {
       )
     })
   }, [language, search, skills])
+
+  const installedMarketSkills = useMemo(() => {
+    return new Map(
+      skills.map((skill) => [skill.canonicalName || skill.name.toLowerCase(), skill] as const),
+    )
+  }, [skills])
+
+  const displayedMarketSkills = useMemo(() => {
+    if (marketQuery.trim()) {
+      return marketResults
+    }
+
+    return recommendedMarketSkills
+  }, [marketQuery, marketResults, recommendedMarketSkills])
 
   const filteredManageSkills = useMemo(() => {
     const normalizedSkills = [...manageSkillsEntries].sort((left, right) => left.name.localeCompare(right.name, language))
@@ -921,6 +983,124 @@ export default function DashboardPage() {
     } finally {
       setGitBusyAction(null)
     }
+  }
+
+  async function handleSearchMarketSkills() {
+    const query = marketQuery.trim()
+    if (!query) {
+      setMarketResults([])
+      setMarketSearched(false)
+      return
+    }
+
+    flushSync(() => {
+      setMarketLoading(true)
+      setMarketSearched(true)
+    })
+    await waitForNextPaint()
+
+    try {
+      const results = await searchSkillMarket(query)
+      setMarketResults(results)
+    } catch (error) {
+      notify(t('dashboard.notifications.marketSearchFailed', { error: String(error) }), 'error')
+      setMarketResults([])
+    } finally {
+      setMarketLoading(false)
+    }
+  }
+
+  async function handleInstallMarketSkill(skill: MarketSkillRecord) {
+    if (!gitPath) {
+      notify(t('dashboard.notifications.chooseSyncDirFirst'), 'error')
+      return
+    }
+
+    if (!(await ensureGitDirectoryAccess(gitPath))) {
+      return
+    }
+
+    flushSync(() => {
+      setMarketBusyPackageId(skill.packageId)
+      setMarketBusyAction('install')
+    })
+    await waitForNextPaint()
+
+    try {
+      const message = await installSkillMarket(gitPath, skill.packageId)
+      await refreshData()
+      notify(message, 'success')
+    } catch (error) {
+      notify(t('dashboard.notifications.marketInstallFailed', { error: String(error) }), 'error')
+    } finally {
+      setMarketBusyPackageId(null)
+      setMarketBusyAction(null)
+    }
+  }
+
+  async function handleRemoveMarketSkill(skill: MarketSkillRecord) {
+    const installedSkill = installedMarketSkills.get(skill.name.toLowerCase())
+    if (!installedSkill) {
+      return
+    }
+
+    setMarketBusyPackageId(skill.packageId)
+    setMarketBusyAction('remove')
+
+    try {
+      await deleteSkill(installedSkill.path)
+      await refreshData()
+      notify(t('dashboard.notifications.skillDeleted'), 'success')
+    } catch (error) {
+      notify(t('dashboard.notifications.marketRemoveFailed', { error: String(error) }), 'error')
+    } finally {
+      setMarketBusyPackageId(null)
+      setMarketBusyAction(null)
+    }
+  }
+
+  async function handleOpenMarketSkillDetail(skill: MarketSkillRecord) {
+    setSelectedMarketSkill(skill)
+    setMarketDetailOpen(true)
+    setMarketDetailError(null)
+
+    const cachedDetail = marketDetailCacheRef.current.get(skill.packageId) ?? null
+    if (cachedDetail) {
+      setMarketDetail(cachedDetail)
+      setMarketDetailLoading(false)
+      return
+    }
+
+    setMarketDetail(null)
+    setMarketDetailLoading(true)
+
+    try {
+      const detail = await getMarketSkillDetail(skill.packageId)
+      marketDetailCacheRef.current.set(skill.packageId, detail)
+      setMarketDetail(detail)
+    } catch (error) {
+      const message = t('dashboard.market.detailFailed', { error: String(error) })
+      setMarketDetailError(message)
+      notify(message, 'error')
+    } finally {
+      setMarketDetailLoading(false)
+    }
+  }
+
+  async function handleOpenMarketRepository(skill: MarketSkillRecord) {
+    try {
+      await openExternal(`https://github.com/${skill.repository}`)
+    } catch (error) {
+      notify(t('dashboard.notifications.marketOpenRepositoryFailed', { error: String(error) }), 'error')
+    }
+  }
+
+  function handleCloseMarketSkillDetail() {
+    setMarketDetailOpen(false)
+    setSelectedMarketSkill(null)
+    setMarketDetail(null)
+    setMarketDetailError(null)
+    setMarketDetailLoading(false)
   }
 
   async function handlePickGitFolder() {
@@ -1329,25 +1509,40 @@ export default function DashboardPage() {
 
       <main className="dashboard-grid">
         <section className="main-column">
-          {activeTab === 'applications' ? (
-            <section ref={appsSectionRef} className={`stack guide-anchor ${highlightedArea === 'apps' ? 'guide-focus' : ''}`}>
-              <div className="section-toolbar section-toolbar--applications">
-                <div className="tabs tabs--embedded">
-                  <button className="tab tab--active" type="button" onClick={() => setActiveTab('applications')}>
-                    {t('dashboard.tabs.apps')}
-                  </button>
-                  <button className="tab" type="button" onClick={() => setActiveTab('skills')}>
-                    {t('dashboard.tabs.skills')}
-                    {stats.conflictCount ? <span className="tab__count tab__count--danger">{stats.conflictCount}</span> : null}
-                  </button>
-                </div>
+          <section ref={appsSectionRef} className={`stack guide-anchor ${highlightedArea === 'apps' ? 'guide-focus' : ''}`}>
+            <div className="section-toolbar section-toolbar--applications">
+              <div className="tabs tabs--embedded tabs--triple">
+                <button className={activeTab === 'applications' ? 'tab tab--active' : 'tab'} type="button" onClick={() => setActiveTab('applications')}>
+                  {t('dashboard.tabs.apps')}
+                </button>
+                <button className={activeTab === 'skills' ? 'tab tab--active' : 'tab'} type="button" onClick={() => setActiveTab('skills')}>
+                  {t('dashboard.tabs.skills')}
+                  {stats.conflictCount && activeTab !== 'market' ? <span className="tab__count tab__count--danger">{stats.conflictCount}</span> : null}
+                </button>
+                <button className={activeTab === 'market' ? 'tab tab--active' : 'tab'} type="button" onClick={() => setActiveTab('market')}>
+                  {t('dashboard.tabs.market')}
+                </button>
+              </div>
+
+              {activeTab === 'applications' ? (
                 <button className="button button--ghost" type="button" onClick={() => setCustomModalOpen(true)}>
                   <FolderPlus size={16} />
                   {t('dashboard.addCustomApp')}
                 </button>
-              </div>
+              ) : null}
+            </div>
 
-              {sortedApps.length === 0 ? (
+            {activeTab === 'skills' ? (
+              <div className="section-filters">
+                <label className="search-box search-box--tab-height section-filters__search">
+                  <Search size={18} />
+                  <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t('dashboard.dialog.searchSkills')} />
+                </label>
+              </div>
+            ) : null}
+
+            {activeTab === 'applications' ? (
+              sortedApps.length === 0 ? (
                 <div className="surface empty-state">
                   <p>{appLoading ? t('dashboard.empty.appsLoading') : t('dashboard.empty.apps')}</p>
                 </div>
@@ -1372,53 +1567,170 @@ export default function DashboardPage() {
                     onEditPath={openEditPath}
                   />
                 ))
-              )}
-            </section>
-          ) : (
-            <section className="stack">
-              <div className="section-toolbar section-toolbar--align-start section-toolbar--applications">
-                <div className="tabs tabs--embedded">
-                  <button className="tab" type="button" onClick={() => setActiveTab('applications')}>
-                    {t('dashboard.tabs.apps')}
-                  </button>
-                  <button className="tab tab--active" type="button">
-                    {t('dashboard.tabs.skills')}
-                    {stats.conflictCount ? <span className="tab__count">{stats.conflictCount}</span> : null}
-                  </button>
-                </div>
-                <label className="search-box">
-                  <Search size={16} />
-                  <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t('dashboard.dialog.searchSkills')} />
-                </label>
-              </div>
+              )
+            ) : null}
 
-              {stats.conflictCount ? (
-                <div className="surface conflict-banner">
-                  <div className="conflict-banner__body">
-                    <strong>{t('dashboard.conflicts.summary', { count: stats.conflictCount })}</strong>
-                    <p>{t('dashboard.conflicts.detail')}</p>
+            {activeTab === 'skills' ? (
+              <>
+                {stats.conflictCount ? (
+                  <div className="surface conflict-banner">
+                    <div className="conflict-banner__body">
+                      <strong>{t('dashboard.conflicts.summary', { count: stats.conflictCount })}</strong>
+                      <p>{t('dashboard.conflicts.detail')}</p>
+                    </div>
                   </div>
-                </div>
-              ) : null}
+                ) : null}
 
-              {filteredSkills.length === 0 ? (
-                <div className="surface empty-state">
-                  <p>{search ? t('dashboard.empty.noSkillMatch') : skillLoading ? t('dashboard.empty.skillsLoading') : t('dashboard.empty.skills')}</p>
+                {filteredSkills.length === 0 ? (
+                  <div className="surface empty-state">
+                    <p>{search ? t('dashboard.empty.noSkillMatch') : skillLoading ? t('dashboard.empty.skillsLoading') : t('dashboard.empty.skills')}</p>
+                  </div>
+                ) : (
+                  filteredSkills.map((skill) => (
+                    <SkillItem
+                      key={skill.id}
+                      skill={skill}
+                      onView={handleViewSkill}
+                      onRename={handleStartRenameSkill}
+                      onDelete={handleAskDeleteSkill}
+                      onResolveConflict={handleResolveConflict}
+                    />
+                  ))
+                )}
+              </>
+            ) : null}
+
+            {activeTab === 'market' ? (
+              <div className="market-panel">
+                <div className="section-filters section-filters--market">
+                  <label className="search-box search-box--tab-height market-search-box">
+                    {marketLoading ? <RefreshCw size={18} className="spin" /> : <Search size={18} />}
+                    <input
+                      value={marketQuery}
+                      onChange={(event) => setMarketQuery(event.target.value)}
+                      disabled={marketLoading}
+                      onKeyDown={(event) => {
+                        if (marketLoading) {
+                          return
+                        }
+                        if (event.key === 'Enter') {
+                          event.preventDefault()
+                          void handleSearchMarketSkills()
+                        }
+                      }}
+                      placeholder={marketLoading ? t('dashboard.market.searching') : t('dashboard.market.searchPlaceholder')}
+                    />
+                  </label>
                 </div>
-              ) : (
-                filteredSkills.map((skill) => (
-                  <SkillItem
-                    key={skill.id}
-                    skill={skill}
-                    onView={handleViewSkill}
-                    onRename={handleStartRenameSkill}
-                    onDelete={handleAskDeleteSkill}
-                    onResolveConflict={handleResolveConflict}
-                  />
-                ))
-              )}
-            </section>
-          )}
+
+                {marketQuery.trim() && marketSearched && !marketLoading && marketResults.length === 0 ? (
+                  <div className="surface empty-state">
+                    <p>{t('dashboard.market.emptyResult')}</p>
+                  </div>
+                ) : null}
+
+                {marketLoading ? (
+                  <div className="surface empty-state">
+                    <p>{t('dashboard.market.searching')}</p>
+                  </div>
+                ) : null}
+
+                {!marketQuery.trim() && recommendedMarketLoading ? (
+                  <div className="surface empty-state">
+                    <p>{t('dashboard.market.recommendedLoading')}</p>
+                  </div>
+                ) : null}
+
+                {!marketQuery.trim() && !recommendedMarketLoading && recommendedMarketError ? (
+                  <div className="surface empty-state">
+                    <p>{recommendedMarketError}</p>
+                  </div>
+                ) : null}
+
+                {!marketQuery.trim() && recommendedMarketInitialized && !recommendedMarketLoading && !recommendedMarketError && displayedMarketSkills.length === 0 ? (
+                  <div className="surface empty-state">
+                    <p>{t('dashboard.market.recommendedEmpty')}</p>
+                  </div>
+                ) : null}
+
+                {!marketLoading && !recommendedMarketLoading && displayedMarketSkills.length > 0 ? (
+                  <>
+                    <div className="market-panel__header">
+                      <div className="market-panel__title">
+                        <Star size={16} />
+                        <span>{marketQuery.trim() ? t('dashboard.market.resultsTitle') : t('dashboard.market.recommendedTitle')}</span>
+                      </div>
+                    </div>
+                    <div className="market-list">
+                      {displayedMarketSkills.map((skill) => {
+                        const installedSkill = installedMarketSkills.get(skill.name.toLowerCase())
+                        const isInstalled = Boolean(installedSkill)
+                        const isBusy = marketBusyPackageId === skill.packageId
+
+                        return (
+                          <article
+                            key={skill.packageId}
+                            className="surface market-card"
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => void handleOpenMarketSkillDetail(skill)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault()
+                                void handleOpenMarketSkillDetail(skill)
+                              }
+                            }}
+                          >
+                            <div className="market-card__content">
+                              <div className="market-card__title-row">
+                                <h3>{skill.name}</h3>
+                                <span className="market-card__author">@{skill.author}</span>
+                              </div>
+                              <p className="market-card__description">{skill.description || t('dashboard.market.descriptionFallback', { repository: skill.repository })}</p>
+                              <div className="market-card__meta">
+                                <span>{skill.downloadsLabel}</span>
+                                {skill.ratingLabel ? <span>{skill.ratingLabel}</span> : null}
+                                <span>{skill.repository}</span>
+                              </div>
+                            </div>
+                            <div className="market-card__actions">
+                              {isInstalled ? (
+                                <button
+                                  className="button button--ghost market-card__button market-card__button--installed"
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    void handleRemoveMarketSkill(skill)
+                                  }}
+                                  disabled={isBusy}
+                                >
+                                  {isBusy && marketBusyAction === 'remove' ? <RefreshCw size={15} className="spin" /> : <Trash2 size={15} />}
+                                  {isBusy && marketBusyAction === 'remove' ? t('dashboard.market.removing') : t('dashboard.market.remove')}
+                                </button>
+                              ) : (
+                                <button
+                                  className="button button--primary market-card__button"
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    void handleInstallMarketSkill(skill)
+                                  }}
+                                  disabled={isBusy}
+                                >
+                                  {isBusy && marketBusyAction === 'install' ? <RefreshCw size={15} className="spin" /> : <Download size={15} />}
+                                  {isBusy && marketBusyAction === 'install' ? t('dashboard.market.installing') : t('dashboard.market.install')}
+                                </button>
+                              )}
+                            </div>
+                          </article>
+                        )
+                      })}
+                    </div>
+                  </>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
         </section>
 
         <aside className="side-column">
@@ -1505,6 +1817,33 @@ export default function DashboardPage() {
           </div>
         </aside>
       </main>
+
+      <MarketSkillDetailModal
+        open={marketDetailOpen}
+        skill={selectedMarketSkill}
+        detail={marketDetail}
+        loading={marketDetailLoading}
+        error={marketDetailError}
+        installed={selectedMarketSkill ? installedMarketSkills.has(selectedMarketSkill.name.toLowerCase()) : false}
+        busy={selectedMarketSkill ? marketBusyPackageId === selectedMarketSkill.packageId : false}
+        busyAction={selectedMarketSkill && marketBusyPackageId === selectedMarketSkill.packageId ? marketBusyAction : null}
+        onClose={handleCloseMarketSkillDetail}
+        onInstall={() => {
+          if (selectedMarketSkill) {
+            void handleInstallMarketSkill(selectedMarketSkill)
+          }
+        }}
+        onRemove={() => {
+          if (selectedMarketSkill) {
+            void handleRemoveMarketSkill(selectedMarketSkill)
+          }
+        }}
+        onOpenRepository={() => {
+          if (selectedMarketSkill) {
+            void handleOpenMarketRepository(selectedMarketSkill)
+          }
+        }}
+      />
 
       <Modal open={guideOpen} title={t('dashboard.guide.title')} onClose={closeGuide} className="modal--guide">
         <div className="modal__body modal__body--stack guide-modal">

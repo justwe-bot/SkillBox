@@ -8,6 +8,8 @@ import type {
   DownloadUpdateResult,
   GitSyncConfig,
   ManagedSkillEntry,
+  MarketSkillDetail,
+  MarketSkillRecord,
   ScanAppsResponse,
   SkillRecord,
   UpdateCheckResult,
@@ -113,6 +115,22 @@ export function saveAppEnabledSkills(appId: string, gitPath: string, enabledEntr
 
 export function syncToGit(repoPath: string) {
   return invoke<void>('sync_to_git', { repoPath })
+}
+
+export function searchSkillMarket(query: string) {
+  return invoke<MarketSkillRecord[]>('search_skill_market', { query })
+}
+
+export function getRecommendedMarketSkills() {
+  return invoke<MarketSkillRecord[]>('get_recommended_market_skills')
+}
+
+export function getMarketSkillDetail(packageId: string) {
+  return invoke<MarketSkillDetail>('get_market_skill_detail', { packageId })
+}
+
+export function installSkillMarket(repoPath: string, packageId: string) {
+  return invoke<string>('install_skill_market', { repoPath, packageId })
 }
 
 export function saveGitPath(path: string) {

@@ -118,3 +118,19 @@ export interface AppEnabledSkillsState {
   enabledEntries: string[]
   skills: ManagedSkillEntry[]
 }
+
+export interface MarketSkillRecord {
+  packageId: string
+  repository: string
+  name: string
+  author: string
+  downloadsLabel: string
+  url: string
+  description: string
+  ratingLabel?: string
+}
+
+export interface MarketSkillDetail {
+  packageId: string
+  readme: string
+}

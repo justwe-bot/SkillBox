@@ -36,6 +36,13 @@ jobs:
             args: --bundles nsis
             artifact_name: skillbox-release-windows-x64
             artifact_path: src-tauri/target/release/bundle/nsis/*
+          - name: Linux x64
+            platform: ubuntu-22.04
+            args: --bundles appimage,deb
+            artifact_name: skillbox-release-linux-x64
+            artifact_path: |
+              src-tauri/target/release/bundle/appimage/*
+              src-tauri/target/release/bundle/deb/*
 
     steps:
       - name: Checkout
@@ -51,6 +58,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -85,7 +102,7 @@ jobs:
       - name: Collect release files
         run: |
           mkdir -p release-files
-          find release-artifacts -type f \( -name '*.dmg' -o -name '*.tar.gz' -o -name '*-setup.exe' \) -exec cp {} release-files/ \;
+          find release-artifacts -type f \( -name '*.dmg' -o -name '*.tar.gz' -o -name '*-setup.exe' -o -name '*.AppImage' -o -name '*.deb' \) -exec cp {} release-files/ \;
           ls -lah release-files
 
       - name: Publish GitHub Release assets

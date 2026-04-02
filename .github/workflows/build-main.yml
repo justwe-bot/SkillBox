@@ -35,11 +35,9 @@ jobs:
             artifact_path: src-tauri/target/release/bundle/nsis/*
           - name: Linux x64
             platform: ubuntu-22.04
-            args: --bundles appimage,deb
+            args: --bundles deb
             artifact_name: skillbox-linux-x64
-            artifact_path: |
-              src-tauri/target/release/bundle/appimage/*
-              src-tauri/target/release/bundle/deb/*
+            artifact_path: src-tauri/target/release/bundle/deb/*
 
     steps:
       - name: Checkout

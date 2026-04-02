@@ -3,6 +3,9 @@ name: Build Main
 on:
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: read
 
@@ -61,15 +64,21 @@ jobs:
           sudo apt-get install -y \
             build-essential \
             libwebkit2gtk-4.0-dev \
-            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.0-dev \
             libsoup2.4-dev \
             libgtk-3-dev \
             libssl-dev \
-            libayatana-appindicator3-dev \
+            libappindicator3-dev \
             librsvg2-dev \
-            libfuse2 \
             file \
             patchelf
+
+      - name: Check Linux pkg-config versions
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          pkg-config --modversion webkit2gtk-4.0
+          pkg-config --modversion javascriptcoregtk-4.0
+          pkg-config --modversion libsoup-2.4
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -81,7 +90,23 @@ jobs:
         run: npm ci
 
       - name: Build Tauri bundles
-        run: npm run tauri -- build ${{ matrix.args }} --verbose
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run tauri -- build ${{ matrix.args }} --verbose 2>&1 | tee /tmp/tauri-build.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "Last 200 lines from the failed Linux build:"
+            tail -n 200 /tmp/tauri-build.log || true
+            {
+              echo "::group::Tauri build failure tail"
+              tail -n 80 /tmp/tauri-build.log || true
+              echo "::endgroup::"
+            } >&2
+            last_line=$(tail -n 1 /tmp/tauri-build.log | tr '\r' ' ' | tr '\n' ' ')
+            echo "::error::Tauri build failed. Last log line: ${last_line}"
+            exit "$status"
+          fi
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

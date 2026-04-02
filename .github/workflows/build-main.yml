@@ -70,6 +70,7 @@ jobs:
             libssl-dev \
             libappindicator3-dev \
             librsvg2-dev \
+            fakeroot \
             file \
             patchelf
 
@@ -92,6 +93,7 @@ jobs:
       - name: Build Tauri bundles
         shell: bash
         run: |
+          set +e
           set -o pipefail
           npm run tauri -- build ${{ matrix.args }} --verbose 2>&1 | tee /tmp/tauri-build.log
           status=${PIPESTATUS[0]}
@@ -103,10 +105,16 @@ jobs:
               tail -n 80 /tmp/tauri-build.log || true
               echo "::endgroup::"
             } >&2
+            tail -n 20 /tmp/tauri-build.log | while IFS= read -r line; do
+              sanitized=${line//'%'/'%25'}
+              sanitized=${sanitized//$'\r'/'%0D'}
+              sanitized=${sanitized//$'\n'/'%0A'}
+              echo "::warning::${sanitized}"
+            done
             last_line=$(tail -n 1 /tmp/tauri-build.log | tr '\r' ' ' | tr '\n' ' ')
             echo "::error::Tauri build failed. Last log line: ${last_line}"
-            exit "$status"
           fi
+          exit "$status"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

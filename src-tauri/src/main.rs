@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -25,6 +25,7 @@ use tauri::Manager;
 use tokio::fs as tokio_fs;
 use tokio::io::AsyncWriteExt;
 use walkdir::{DirEntry, WalkDir};
+use zip::ZipArchive;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SkillApp {
@@ -229,6 +230,11 @@ struct GitHubRelease {
     published_at: Option<String>,
     #[serde(default)]
     assets: Vec<GitHubReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubRepositoryInfo {
+    default_branch: String,
 }
 
 const SYNC_MANIFEST_FILE: &str = ".skillbox-sync.json";
@@ -2970,6 +2976,10 @@ fn command_exists(binary: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn skills_cli_available() -> bool {
+    command_exists("skills") || command_exists("npx")
+}
+
 fn run_skills_cli(args: &[String], cwd: Option<&Path>) -> Result<String, String> {
     let mut command = if command_exists("skills") {
         let mut command = Command::new("skills");
@@ -3071,11 +3081,83 @@ fn parse_market_search_results(output: &str) -> Vec<MarketSkillRecord> {
                     author,
                     downloads_label,
                     url,
-                    description: format!("来源仓库: {}", repository),
+                    description: String::new(),
                     rating_label: None,
                 });
             }
         }
+    }
+
+    results
+}
+
+fn parse_market_search_results_html(html: &str) -> Vec<MarketSkillRecord> {
+    let document = Html::parse_document(html);
+    let anchor_selector = Selector::parse("main a[href]").expect("valid search anchor selector");
+    let title_selector = Selector::parse("h3").expect("valid search title selector");
+    let repository_selector = Selector::parse("p").expect("valid search repository selector");
+    let span_selector = Selector::parse("span").expect("valid search span selector");
+    let mut seen_package_ids = HashSet::new();
+    let mut results = Vec::new();
+
+    for anchor in document.select(&anchor_selector) {
+        let Some(href) = anchor.value().attr("href") else {
+            continue;
+        };
+        if !href.starts_with('/') {
+            continue;
+        }
+
+        let segments: Vec<&str> = href.trim_start_matches('/').split('/').collect();
+        if segments.len() != 3 || segments.iter().any(|segment| segment.trim().is_empty()) {
+            continue;
+        }
+
+        let repository = format!("{}/{}", segments[0].trim(), segments[1].trim());
+        let skill_name = segments[2].trim().to_string();
+        let package_id = format!("{}@{}", repository, skill_name);
+        if !seen_package_ids.insert(package_id.clone()) {
+            continue;
+        }
+
+        let name = anchor
+            .select(&title_selector)
+            .next()
+            .map(|node| normalize_market_text(&node.text().collect::<Vec<_>>().join(" ")))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| skill_name.clone());
+
+        let repository_label = anchor
+            .select(&repository_selector)
+            .next()
+            .map(|node| normalize_market_text(&node.text().collect::<Vec<_>>().join(" ")))
+            .filter(|value| value.contains('/'))
+            .unwrap_or_else(|| repository.clone());
+
+        let downloads_label = anchor
+            .select(&span_selector)
+            .filter_map(|node| {
+                let value = normalize_market_text(&node.text().collect::<Vec<_>>().join(" "));
+                if value.is_empty() {
+                    None
+                } else {
+                    Some(value)
+                }
+            })
+            .last()
+            .map(|value| format!("{} installs", value))
+            .unwrap_or_default();
+
+        results.push(MarketSkillRecord {
+            package_id,
+            repository: repository_label.clone(),
+            name,
+            author: segments[0].trim().to_string(),
+            downloads_label,
+            url: format!("https://skills.sh{}", href),
+            description: String::new(),
+            rating_label: None,
+        });
     }
 
     results
@@ -3166,7 +3248,146 @@ fn create_market_temp_dir(skill_name: &str, purpose: &str) -> Result<PathBuf, St
     Ok(temp_dir)
 }
 
-fn install_market_skill_into_temp(
+fn build_market_blocking_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .user_agent(format!("SkillBox/{}", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| format!("创建市场客户端失败: {}", error))
+}
+
+fn parse_github_repository(repository: &str) -> Result<(&str, &str), String> {
+    repository
+        .split_once('/')
+        .ok_or_else(|| format!("无效的 GitHub 仓库标识: {}", repository))
+}
+
+fn get_github_repository_info(
+    client: &reqwest::blocking::Client,
+    repository: &str,
+) -> Result<GitHubRepositoryInfo, String> {
+    let (owner, repo) = parse_github_repository(repository)?;
+    let mut url = reqwest::Url::parse("https://api.github.com/repos")
+        .map_err(|error| format!("创建 GitHub API 地址失败: {}", error))?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| "创建 GitHub API 地址失败".to_string())?;
+        segments.push(owner);
+        segments.push(repo);
+    }
+
+    let response = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .map_err(|error| format!("请求 GitHub 仓库信息失败: {}", error))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "GitHub 仓库信息返回异常状态: {}",
+            response.status()
+        ));
+    }
+
+    response
+        .json::<GitHubRepositoryInfo>()
+        .map_err(|error| format!("解析 GitHub 仓库信息失败: {}", error))
+}
+
+fn download_github_repository_archive(
+    client: &reqwest::blocking::Client,
+    repository: &str,
+    branch: &str,
+) -> Result<Vec<u8>, String> {
+    let (owner, repo) = parse_github_repository(repository)?;
+    let mut url = reqwest::Url::parse("https://api.github.com/repos")
+        .map_err(|error| format!("创建 GitHub 下载地址失败: {}", error))?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| "创建 GitHub 下载地址失败".to_string())?;
+        segments.push(owner);
+        segments.push(repo);
+        segments.push("zipball");
+        segments.push(branch);
+    }
+
+    let response = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .map_err(|error| format!("下载 GitHub 技能归档失败: {}", error))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "GitHub 技能归档返回异常状态: {}",
+            response.status()
+        ));
+    }
+
+    response
+        .bytes()
+        .map(|bytes| bytes.to_vec())
+        .map_err(|error| format!("读取 GitHub 技能归档失败: {}", error))
+}
+
+fn extract_market_archive(archive_bytes: &[u8], output_dir: &Path) -> Result<(), String> {
+    let reader = Cursor::new(archive_bytes);
+    let mut archive =
+        ZipArchive::new(reader).map_err(|error| format!("解析技能归档失败: {}", error))?;
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("读取技能归档条目失败: {}", error))?;
+        let Some(enclosed_path) = entry.enclosed_name().map(|path| path.to_path_buf()) else {
+            continue;
+        };
+
+        let relative_path = enclosed_path.iter().skip(1).collect::<PathBuf>();
+        if relative_path.as_os_str().is_empty() {
+            continue;
+        }
+
+        let target_path = output_dir.join(relative_path);
+        if entry.is_dir() {
+            fs::create_dir_all(&target_path)
+                .map_err(|error| format!("创建技能目录失败: {}", error))?;
+            continue;
+        }
+
+        if let Some(parent) = target_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| format!("创建技能目录失败: {}", error))?;
+        }
+
+        let mut output_file = fs::File::create(&target_path)
+            .map_err(|error| format!("写入技能文件失败: {}", error))?;
+        std::io::copy(&mut entry, &mut output_file)
+            .map_err(|error| format!("写入技能文件失败: {}", error))?;
+
+        #[cfg(unix)]
+        if let Some(mode) = entry.unix_mode() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let _ = fs::set_permissions(&target_path, fs::Permissions::from_mode(mode));
+        }
+    }
+
+    Ok(())
+}
+
+fn find_installed_market_skill_dir(temp_dir: &Path, skill_name: &str) -> Result<PathBuf, String> {
+    [
+        temp_dir.join("skills").join(skill_name),
+        temp_dir.join(".agents").join("skills").join(skill_name),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
+    .ok_or_else(|| format!("未找到安装后的技能目录：{}", skill_name))
+}
+
+fn install_market_skill_into_temp_via_cli(
     repository: &str,
     skill_name: &str,
     temp_dir: &Path,
@@ -3189,13 +3410,61 @@ fn install_market_skill_into_temp(
         Some(temp_dir),
     )?;
 
-    [
-        temp_dir.join("skills").join(skill_name),
-        temp_dir.join(".agents").join("skills").join(skill_name),
-    ]
-    .into_iter()
-    .find(|path| path.exists())
-    .ok_or_else(|| format!("未找到安装后的技能目录：{}", skill_name))
+    find_installed_market_skill_dir(temp_dir, skill_name)
+}
+
+fn install_market_skill_into_temp_native(
+    repository: &str,
+    skill_name: &str,
+    temp_dir: &Path,
+) -> Result<PathBuf, String> {
+    let client = build_market_blocking_client()?;
+    let repository_info = get_github_repository_info(&client, repository)?;
+    let archive_bytes =
+        download_github_repository_archive(&client, repository, &repository_info.default_branch)?;
+    extract_market_archive(&archive_bytes, temp_dir)?;
+    find_installed_market_skill_dir(temp_dir, skill_name)
+}
+
+fn install_market_skill_into_temp(
+    repository: &str,
+    skill_name: &str,
+    temp_dir: &Path,
+) -> Result<PathBuf, String> {
+    if skills_cli_available() {
+        match install_market_skill_into_temp_via_cli(repository, skill_name, temp_dir) {
+            Ok(path) => return Ok(path),
+            Err(cli_error) => {
+                return install_market_skill_into_temp_native(repository, skill_name, temp_dir)
+                    .map_err(|native_error| {
+                        format!(
+                            "通过 skills CLI 安装失败：{}；内置安装兜底也失败：{}",
+                            cli_error, native_error
+                        )
+                    });
+            }
+        }
+    }
+
+    install_market_skill_into_temp_native(repository, skill_name, temp_dir)
+}
+
+fn search_skill_market_native(query: &str) -> Result<Vec<MarketSkillRecord>, String> {
+    let client = build_market_blocking_client()?;
+    let response = client
+        .get("https://skills.sh/")
+        .query(&[("q", query)])
+        .send()
+        .map_err(|error| format!("请求 skills.sh 搜索失败: {}", error))?;
+
+    if !response.status().is_success() {
+        return Err(format!("skills.sh 搜索返回异常状态: {}", response.status()));
+    }
+
+    let html = response
+        .text()
+        .map_err(|error| format!("读取 skills.sh 搜索响应失败: {}", error))?;
+    Ok(parse_market_search_results_html(&html))
 }
 
 fn strip_markdown_frontmatter(content: &str) -> String {
@@ -3290,12 +3559,27 @@ async fn search_skill_market(query: String) -> Result<Vec<MarketSkillRecord>, St
             return Ok(Vec::new());
         }
 
-        let output = run_skills_cli(&vec!["find".to_string(), trimmed_query.clone()], None)?;
-        if output.contains(&format!("No skills found for \"{}\"", trimmed_query)) {
-            return Ok(Vec::new());
+        if skills_cli_available() {
+            match run_skills_cli(&vec!["find".to_string(), trimmed_query.clone()], None) {
+                Ok(output) => {
+                    if output.contains(&format!("No skills found for \"{}\"", trimmed_query)) {
+                        return Ok(Vec::new());
+                    }
+
+                    return Ok(parse_market_search_results(&output));
+                }
+                Err(cli_error) => {
+                    return search_skill_market_native(&trimmed_query).map_err(|native_error| {
+                        format!(
+                            "通过 skills CLI 搜索失败：{}；内置搜索兜底也失败：{}",
+                            cli_error, native_error
+                        )
+                    });
+                }
+            }
         }
 
-        Ok(parse_market_search_results(&output))
+        search_skill_market_native(&trimmed_query)
     })
     .await
     .map_err(|error| error.to_string())?

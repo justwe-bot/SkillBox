@@ -49,6 +49,7 @@ const BRAND_ICON_PATHS: Record<string, string> = {
   roocode: '/brand-icons/unified/roocode.png',
   trae: '/brand-icons/unified/trae.png',
   windsurf: '/brand-icons/unified/windsurf.png',
+  zcode: '/brand-icons/unified/zcode.png',
 }
 
 export function AppBrandIcon({ appId, appName }: AppBrandIconProps) {

@@ -76,6 +76,20 @@ struct MarketSkillDetail {
     readme: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct SkillsApiSearchResponse {
+    skills: Vec<SkillsApiSkillItem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SkillsApiSkillItem {
+    id: String,
+    skill_id: String,
+    name: String,
+    installs: u64,
+    source: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AppConfig {
     #[serde(default)]
@@ -325,6 +339,17 @@ fn build_macos_known_apps(home: &Path) -> Vec<KnownApp> {
             vec![home.join(".config/opencode")],
         ),
         known_app(
+            "zcode",
+            "ZCode",
+            "🧠",
+            vec![home.join(".zcode/skills"), home.join(".agents/skills")],
+            vec![
+                PathBuf::from("/Applications/ZCode.app"),
+                app_support.join("ZCode"),
+                home.join(".zcode"),
+            ],
+        ),
+        known_app(
             "cline",
             "Cline",
             "⚡",
@@ -505,6 +530,13 @@ fn build_windows_known_apps(home: &Path) -> Vec<KnownApp> {
             vec![home.join(".config/opencode")],
         ),
         known_app(
+            "zcode",
+            "ZCode",
+            "🧠",
+            vec![home.join(".zcode/skills"), home.join(".agents/skills")],
+            vec![app_data.join("ZCode"), home.join(".zcode")],
+        ),
+        known_app(
             "cline",
             "Cline",
             "⚡",
@@ -661,6 +693,13 @@ fn build_linux_known_apps(home: &Path) -> Vec<KnownApp> {
             "💻",
             vec![config_dir.join("opencode/skills")],
             vec![config_dir.join("opencode")],
+        ),
+        known_app(
+            "zcode",
+            "ZCode",
+            "🧠",
+            vec![home.join(".zcode/skills"), home.join(".agents/skills")],
+            vec![config_dir.join("ZCode"), home.join(".zcode")],
         ),
         known_app(
             "cline",
@@ -3167,6 +3206,39 @@ fn normalize_market_text(content: &str) -> String {
     content.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn parse_market_search_results_json(response: &SkillsApiSearchResponse) -> Vec<MarketSkillRecord> {
+    response
+        .skills
+        .iter()
+        .filter_map(|item| {
+            let segments: Vec<&str> = item.id.split('/').collect();
+            if segments.len() < 3 {
+                return None;
+            }
+
+            let repository = format!("{}/{}", segments[0], segments[1]);
+            let skill_name = if segments.len() >= 3 {
+                segments[segments.len() - 1].to_string()
+            } else {
+                item.skill_id.clone()
+            };
+            let package_id = format!("{}@{}", repository, skill_name);
+            let author = segments[0].to_string();
+
+            Some(MarketSkillRecord {
+                package_id,
+                repository,
+                name: item.name.clone(),
+                author,
+                downloads_label: format!("{} installs", item.installs),
+                url: format!("https://skills.sh{}", item.id),
+                description: String::new(),
+                rating_label: None,
+            })
+        })
+        .collect()
+}
+
 fn parse_recommended_market_skills_html(html: &str) -> Vec<MarketSkillRecord> {
     let document = Html::parse_document(html);
     let anchor_selector = Selector::parse("a[href]").expect("valid anchor selector");
@@ -3452,7 +3524,7 @@ fn install_market_skill_into_temp(
 fn search_skill_market_native(query: &str) -> Result<Vec<MarketSkillRecord>, String> {
     let client = build_market_blocking_client()?;
     let response = client
-        .get("https://skills.sh/")
+        .get("https://skills.sh/api/search")
         .query(&[("q", query)])
         .send()
         .map_err(|error| format!("请求 skills.sh 搜索失败: {}", error))?;
@@ -3461,10 +3533,10 @@ fn search_skill_market_native(query: &str) -> Result<Vec<MarketSkillRecord>, Str
         return Err(format!("skills.sh 搜索返回异常状态: {}", response.status()));
     }
 
-    let html = response
-        .text()
-        .map_err(|error| format!("读取 skills.sh 搜索响应失败: {}", error))?;
-    Ok(parse_market_search_results_html(&html))
+    let api_response = response
+        .json::<SkillsApiSearchResponse>()
+        .map_err(|error| format!("解析 skills.sh 搜索响应失败: {}", error))?;
+    Ok(parse_market_search_results_json(&api_response))
 }
 
 fn strip_markdown_frontmatter(content: &str) -> String {

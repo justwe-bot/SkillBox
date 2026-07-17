@@ -42,6 +42,7 @@ const BRAND_ICON_PATHS: Record<string, string> = {
   copilot: '/brand-icons/unified/copilot.png',
   cursor: '/brand-icons/unified/cursor.png',
   gemini: '/brand-icons/unified/gemini.png',
+  grok: '/brand-icons/unified/grok.png',
   kiro: '/brand-icons/unified/kiro.png',
   openclaw: '/brand-icons/unified/openclaw.png',
   opencode: '/brand-icons/unified/opencode.png',
@@ -49,6 +50,7 @@ const BRAND_ICON_PATHS: Record<string, string> = {
   roocode: '/brand-icons/unified/roocode.png',
   trae: '/brand-icons/unified/trae.png',
   windsurf: '/brand-icons/unified/windsurf.png',
+  workbuddy: '/brand-icons/unified/workbuddy.png',
   zcode: '/brand-icons/unified/zcode.png',
 }
 

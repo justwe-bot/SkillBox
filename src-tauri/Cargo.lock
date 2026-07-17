@@ -3266,7 +3266,7 @@ checksum = "b2aa850e253778c88a04c3d7323b043aeda9d3e30d5971937c1855769763678e"
 
 [[package]]
 name = "skillbox"
-version = "2026.7.11"
+version = "2026.7.17"
 dependencies = [
  "chrono",
  "dirs",

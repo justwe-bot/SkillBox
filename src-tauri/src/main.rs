@@ -350,6 +350,24 @@ fn build_macos_known_apps(home: &Path) -> Vec<KnownApp> {
             ],
         ),
         known_app(
+            "grok",
+            "Grok Build",
+            "✦",
+            vec![home.join(".grok/skills"), home.join(".agents/skills")],
+            vec![home.join(".grok")],
+        ),
+        known_app(
+            "workbuddy",
+            "WorkBuddy",
+            "💼",
+            vec![home.join(".workbuddy/skills")],
+            vec![
+                PathBuf::from("/Applications/WorkBuddy.app"),
+                app_support.join("@genie/workbuddy-desktop"),
+                home.join(".workbuddy"),
+            ],
+        ),
+        known_app(
             "cline",
             "Cline",
             "⚡",
@@ -537,6 +555,24 @@ fn build_windows_known_apps(home: &Path) -> Vec<KnownApp> {
             vec![app_data.join("ZCode"), home.join(".zcode")],
         ),
         known_app(
+            "grok",
+            "Grok Build",
+            "✦",
+            vec![home.join(".grok/skills"), home.join(".agents/skills")],
+            vec![home.join(".grok")],
+        ),
+        known_app(
+            "workbuddy",
+            "WorkBuddy",
+            "💼",
+            vec![home.join(".workbuddy/skills")],
+            vec![
+                app_data.join("@genie/workbuddy-desktop"),
+                app_data.join("WorkBuddy"),
+                home.join(".workbuddy"),
+            ],
+        ),
+        known_app(
             "cline",
             "Cline",
             "⚡",
@@ -702,6 +738,24 @@ fn build_linux_known_apps(home: &Path) -> Vec<KnownApp> {
             vec![config_dir.join("ZCode"), home.join(".zcode")],
         ),
         known_app(
+            "grok",
+            "Grok Build",
+            "✦",
+            vec![home.join(".grok/skills"), home.join(".agents/skills")],
+            vec![home.join(".grok")],
+        ),
+        known_app(
+            "workbuddy",
+            "WorkBuddy",
+            "💼",
+            vec![home.join(".workbuddy/skills")],
+            vec![
+                config_dir.join("@genie/workbuddy-desktop"),
+                config_dir.join("WorkBuddy"),
+                home.join(".workbuddy"),
+            ],
+        ),
+        known_app(
             "cline",
             "Cline",
             "⚡",
@@ -833,6 +887,82 @@ fn build_linux_known_apps(home: &Path) -> Vec<KnownApp> {
 
 fn find_known_app(app_id: &str) -> Option<KnownApp> {
     build_known_apps().into_iter().find(|app| app.id == app_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn find_test_app(apps: Vec<KnownApp>, app_id: &str) -> KnownApp {
+        apps.into_iter()
+            .find(|app| app.id == app_id)
+            .unwrap_or_else(|| panic!("expected known app `{}` to be registered", app_id))
+    }
+
+    #[test]
+    fn known_apps_include_workbuddy_skill_paths() {
+        let home = PathBuf::from("/Users/example");
+
+        let macos = find_test_app(build_macos_known_apps(&home), "workbuddy");
+        assert_eq!(macos.name, "WorkBuddy");
+        assert_eq!(macos.skill_paths, vec![home.join(".workbuddy/skills")]);
+        assert!(macos
+            .install_markers
+            .contains(&PathBuf::from("/Applications/WorkBuddy.app")));
+        assert!(macos.install_markers.contains(&home.join(".workbuddy")));
+        assert!(macos
+            .install_markers
+            .contains(&home.join("Library/Application Support/@genie/workbuddy-desktop")));
+
+        let windows = find_test_app(build_windows_known_apps(&home), "workbuddy");
+        assert_eq!(windows.name, "WorkBuddy");
+        assert_eq!(windows.skill_paths, vec![home.join(".workbuddy/skills")]);
+        assert!(windows.install_markers.contains(&home.join(".workbuddy")));
+
+        let linux = find_test_app(build_linux_known_apps(&home), "workbuddy");
+        assert_eq!(linux.name, "WorkBuddy");
+        assert_eq!(linux.skill_paths, vec![home.join(".workbuddy/skills")]);
+        assert!(linux.install_markers.contains(&home.join(".workbuddy")));
+    }
+
+    #[test]
+    fn known_apps_include_grok_skill_paths() {
+        let home = PathBuf::from("/Users/example");
+
+        let macos = find_test_app(build_macos_known_apps(&home), "grok");
+        assert_eq!(macos.name, "Grok Build");
+        assert_eq!(
+            macos.skill_paths,
+            vec![home.join(".grok/skills"), home.join(".agents/skills")]
+        );
+        assert!(macos.install_markers.contains(&home.join(".grok")));
+        assert!(!macos
+            .install_markers
+            .contains(&PathBuf::from("/Applications/Grok.app")));
+        assert!(!macos
+            .install_markers
+            .contains(&home.join("Library/Application Support/Grok")));
+
+        let windows = find_test_app(build_windows_known_apps(&home), "grok");
+        assert_eq!(windows.name, "Grok Build");
+        assert_eq!(
+            windows.skill_paths,
+            vec![home.join(".grok/skills"), home.join(".agents/skills")]
+        );
+        assert!(windows.install_markers.contains(&home.join(".grok")));
+        assert!(!windows
+            .install_markers
+            .contains(&home.join("AppData/Roaming/Grok")));
+
+        let linux = find_test_app(build_linux_known_apps(&home), "grok");
+        assert_eq!(linux.name, "Grok Build");
+        assert_eq!(
+            linux.skill_paths,
+            vec![home.join(".grok/skills"), home.join(".agents/skills")]
+        );
+        assert!(linux.install_markers.contains(&home.join(".grok")));
+        assert!(!linux.install_markers.contains(&home.join(".config/grok")));
+    }
 }
 
 fn should_skip_walk_entry(entry: &DirEntry) -> bool {

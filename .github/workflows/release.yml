@@ -49,6 +49,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate release version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          expected="${GITHUB_REF_NAME#v}"
+          package_version="$(node -p "require('./package.json').version")"
+          package_lock_version="$(node -p "require('./package-lock.json').version")"
+          package_lock_root_version="$(node -p "require('./package-lock.json').packages[''].version")"
+          tauri_version="$(node -p "require('./src-tauri/tauri.conf.json').package.version")"
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)"
+
+          echo "Release tag: ${GITHUB_REF_NAME}"
+          echo "package.json: ${package_version}"
+          echo "package-lock.json: ${package_lock_version}"
+          echo "package-lock root package: ${package_lock_root_version}"
+          echo "src-tauri/tauri.conf.json: ${tauri_version}"
+          echo "src-tauri/Cargo.toml: ${cargo_version}"
+
+          if [ "${package_version}" != "${expected}" ] || [ "${package_lock_version}" != "${expected}" ] || [ "${package_lock_root_version}" != "${expected}" ] || [ "${tauri_version}" != "${expected}" ] || [ "${cargo_version}" != "${expected}" ]; then
+            echo "::error::Release tag ${GITHUB_REF_NAME} does not match app version files."
+            exit 1
+          fi
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:

@@ -46,6 +46,9 @@ xattr -dr com.apple.quarantine /Applications/SkillBox.app
 | Codex | `~/.codex/skills` |
 | GitHub Copilot | `~/.copilot/skills` |
 | opencode | `~/.config/opencode/skills` |
+| ZCode | `~/.zcode/skills` |
+| Grok Build | `~/.grok/skills` |
+| WorkBuddy | `~/.workbuddy/skills` |
 
 ## 软链接说明
 

@@ -20,12 +20,22 @@ function writeJson(filePath, value) {
 }
 
 const packageJsonPath = path.join(rootDir, 'package.json')
+const packageLockPath = path.join(rootDir, 'package-lock.json')
 const tauriConfigPath = path.join(rootDir, 'src-tauri', 'tauri.conf.json')
 const cargoTomlPath = path.join(rootDir, 'src-tauri', 'Cargo.toml')
 
 const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'))
 packageJson.version = version
 writeJson(packageJsonPath, packageJson)
+
+if (fs.existsSync(packageLockPath)) {
+  const packageLock = JSON.parse(fs.readFileSync(packageLockPath, 'utf8'))
+  packageLock.version = version
+  if (packageLock.packages?.['']) {
+    packageLock.packages[''].version = version
+  }
+  writeJson(packageLockPath, packageLock)
+}
 
 const tauriConfig = JSON.parse(fs.readFileSync(tauriConfigPath, 'utf8'))
 tauriConfig.package.version = version

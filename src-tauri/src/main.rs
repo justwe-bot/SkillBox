@@ -963,6 +963,72 @@ mod tests {
         assert!(linux.install_markers.contains(&home.join(".grok")));
         assert!(!linux.install_markers.contains(&home.join(".config/grok")));
     }
+
+    fn create_recovery_test_dir(name: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "skillbox-{}-{}-{}",
+            name,
+            std::process::id(),
+            unique
+        ))
+    }
+
+    #[test]
+    fn stale_backup_recovery_merges_recreated_directory_before_linking() {
+        let root = create_recovery_test_dir("stale-backup");
+        let skill_dir = root.join("skills");
+        let backup_dir = root.join("skill_backup");
+
+        fs::create_dir_all(skill_dir.join(".system")).unwrap();
+        fs::create_dir_all(skill_dir.join("new-skill")).unwrap();
+        fs::write(skill_dir.join(".system/version.txt"), "new").unwrap();
+        fs::write(skill_dir.join("new-skill/SKILL.md"), "new skill").unwrap();
+
+        fs::create_dir_all(backup_dir.join(".system")).unwrap();
+        fs::create_dir_all(backup_dir.join("existing-skill")).unwrap();
+        fs::write(backup_dir.join(".system/version.txt"), "old").unwrap();
+        fs::write(
+            backup_dir.join("existing-skill/SKILL.md"),
+            "existing skill",
+        )
+        .unwrap();
+
+        recover_recreated_skill_path(&skill_dir, &backup_dir).unwrap();
+
+        assert!(!skill_dir.exists());
+        assert_eq!(
+            fs::read_to_string(backup_dir.join(".system/version.txt")).unwrap(),
+            "new"
+        );
+        assert!(backup_dir.join("new-skill/SKILL.md").exists());
+        assert!(backup_dir.join("existing-skill/SKILL.md").exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_backup_recovery_keeps_backup_when_app_path_is_missing() {
+        let root = create_recovery_test_dir("missing-app-path");
+        let skill_dir = root.join("skills");
+        let backup_dir = root.join("skill_backup");
+
+        fs::create_dir_all(&backup_dir).unwrap();
+        fs::write(backup_dir.join("SKILL.md"), "preserved").unwrap();
+
+        recover_recreated_skill_path(&skill_dir, &backup_dir).unwrap();
+
+        assert!(!skill_dir.exists());
+        assert_eq!(
+            fs::read_to_string(backup_dir.join("SKILL.md")).unwrap(),
+            "preserved"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn should_skip_walk_entry(entry: &DirEntry) -> bool {
@@ -2487,6 +2553,65 @@ fn copy_path_recursive(source: &Path, target: &Path) -> Result<(), String> {
         fs::copy(source, target).map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+fn merge_path_overwriting(source: &Path, target: &Path) -> Result<(), String> {
+    let source_metadata = fs::symlink_metadata(source).map_err(|e| e.to_string())?;
+
+    if source_metadata.is_dir() {
+        if let Ok(target_metadata) = fs::symlink_metadata(target) {
+            if !target_metadata.is_dir() || target_metadata.file_type().is_symlink() {
+                remove_path_if_exists(target)?;
+            }
+        }
+
+        fs::create_dir_all(target).map_err(|e| e.to_string())?;
+        for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            merge_path_overwriting(&entry.path(), &target.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+
+    if fs::symlink_metadata(target).is_ok() {
+        remove_path_if_exists(target)?;
+    }
+
+    copy_path_recursive(source, target)
+}
+
+fn recover_recreated_skill_path(skill_path: &Path, backup_path: &Path) -> Result<(), String> {
+    let Ok(backup_metadata) = fs::symlink_metadata(backup_path) else {
+        return Ok(());
+    };
+
+    if backup_metadata.file_type().is_symlink() {
+        return Err(format!(
+            "Backup path must not be a symlink: {}",
+            backup_path.to_string_lossy()
+        ));
+    }
+
+    let Ok(skill_metadata) = fs::symlink_metadata(skill_path) else {
+        return Ok(());
+    };
+
+    if skill_metadata.file_type().is_symlink() {
+        return Err(format!(
+            "Unable to recover an unrecognized link: {}",
+            skill_path.to_string_lossy()
+        ));
+    }
+
+    if skill_metadata.is_dir() != backup_metadata.is_dir() {
+        return Err(format!(
+            "Cannot merge the recreated app path with its backup because their types differ: {}",
+            backup_path.to_string_lossy()
+        ));
+    }
+
+    merge_path_overwriting(skill_path, backup_path)?;
+    remove_path_if_exists(skill_path)
 }
 
 fn copy_path_recursive_without_local_only(
@@ -4581,10 +4706,8 @@ fn link_app(app_id: String, git_path: String) -> Result<String, String> {
     let link_mode = detect_link_mode(&skill_dir, &app_id, &config);
 
     if backup_dir.exists() && !matches!(link_mode.as_deref(), Some("legacy" | "managed")) {
-        return Err(format!(
-            "Backup already exists. Unlink first: {}",
-            backup_dir.to_string_lossy()
-        ));
+        // An app may recreate its normal skill path after the previous link target disappears.
+        recover_recreated_skill_path(&skill_dir, &backup_dir)?;
     }
 
     if sync_dir.exists() && !sync_dir.is_dir() {

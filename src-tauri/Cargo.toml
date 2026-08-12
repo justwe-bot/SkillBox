@@ -24,6 +24,9 @@ walkdir = "2.5"
 scraper = "0.19"
 zip = "2"
 
+[target.'cfg(windows)'.dependencies]
+junction = "2"
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

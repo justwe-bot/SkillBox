@@ -21,6 +21,8 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use tauri::Manager;
 use tokio::fs as tokio_fs;
 use tokio::io::AsyncWriteExt;
@@ -1029,6 +1031,36 @@ mod tests {
 
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_directory_link_preserves_source_when_removed() {
+        let root = create_recovery_test_dir("windows-directory-link");
+        let source = root.join("source");
+        let target = root.join("target");
+
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("marker.txt"), "preserved").unwrap();
+
+        create_symlink(&source, &target).unwrap();
+
+        let metadata = fs::symlink_metadata(&target).unwrap();
+        assert!(is_link_metadata(&metadata));
+        assert_eq!(
+            fs::read_to_string(target.join("marker.txt")).unwrap(),
+            "preserved"
+        );
+
+        remove_path_if_exists(&target).unwrap();
+
+        assert!(!target.exists());
+        assert_eq!(
+            fs::read_to_string(source.join("marker.txt")).unwrap(),
+            "preserved"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn should_skip_walk_entry(entry: &DirEntry) -> bool {
@@ -1630,7 +1662,7 @@ fn remove_path_if_exists(path: &Path) -> Result<(), String> {
         return Ok(());
     };
 
-    if metadata.file_type().is_symlink() {
+    if is_link_metadata(&metadata) {
         return fs::remove_file(path)
             .or_else(|_| fs::remove_dir(path))
             .map_err(|e| e.to_string());
@@ -1942,9 +1974,48 @@ fn create_symlink(source: &Path, target: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
         if source.is_dir() {
-            std::os::windows::fs::symlink_dir(source, target).map_err(|e| e.to_string())?;
+            match std::os::windows::fs::symlink_dir(source, target) {
+                Ok(()) => {}
+                Err(error) if error.raw_os_error() == Some(1314) => {
+                    let output = Command::new("cmd")
+                        .args(["/D", "/C", "mklink", "/J"])
+                        .arg(target)
+                        .arg(source)
+                        .output()
+                        .map_err(|fallback_error| {
+                            format!(
+                                "Failed to create directory link after symlink permission was denied: {}",
+                                fallback_error
+                            )
+                        })?;
+
+                    if !output.status.success() {
+                        let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                        return Err(if message.is_empty() {
+                            format!(
+                                "Failed to create directory junction: {}",
+                                String::from_utf8_lossy(&output.stdout).trim()
+                            )
+                        } else {
+                            format!("Failed to create directory junction: {}", message)
+                        });
+                    }
+                }
+                Err(error) => return Err(error.to_string()),
+            }
         } else {
-            std::os::windows::fs::symlink_file(source, target).map_err(|e| e.to_string())?;
+            match std::os::windows::fs::symlink_file(source, target) {
+                Ok(()) => {}
+                Err(error) if error.raw_os_error() == Some(1314) => {
+                    fs::hard_link(source, target).map_err(|fallback_error| {
+                        format!(
+                            "Failed to create file link after symlink permission was denied: {}",
+                            fallback_error
+                        )
+                    })?;
+                }
+                Err(error) => return Err(error.to_string()),
+            }
         }
     }
 
@@ -2290,7 +2361,7 @@ fn ensure_app_points_to_managed_dir(
     managed_dir: &Path,
 ) -> Result<(), String> {
     if let Ok(metadata) = fs::symlink_metadata(skill_dir) {
-        if metadata.file_type().is_symlink() {
+        if is_link_metadata(&metadata) {
             remove_path_if_exists(skill_dir)?;
         } else if !backup_dir.exists() {
             fs::rename(skill_dir, backup_dir).map_err(|e| e.to_string())?;
@@ -2313,7 +2384,7 @@ fn cleanup_legacy_skill_paths(app_id: &str) -> Result<(), String> {
         let backup_dir = get_backup_path(&legacy_path);
 
         if let Ok(metadata) = fs::symlink_metadata(&legacy_path) {
-            if metadata.file_type().is_symlink() {
+            if is_link_metadata(&metadata) {
                 remove_path_if_exists(&legacy_path)?;
             }
         }
@@ -2331,7 +2402,7 @@ fn cleanup_legacy_skill_paths(app_id: &str) -> Result<(), String> {
 
 fn detect_link_mode(skill_dir: &Path, app_id: &str, config: &AppConfig) -> Option<String> {
     let metadata = fs::symlink_metadata(skill_dir).ok()?;
-    if !metadata.file_type().is_symlink() {
+    if !is_link_metadata(&metadata) {
         return None;
     }
 
@@ -2555,12 +2626,27 @@ fn copy_path_recursive(source: &Path, target: &Path) -> Result<(), String> {
     }
 }
 
+fn is_link_metadata(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+
+    #[cfg(not(windows))]
+    false
+}
+
 fn merge_path_overwriting(source: &Path, target: &Path) -> Result<(), String> {
     let source_metadata = fs::symlink_metadata(source).map_err(|e| e.to_string())?;
 
     if source_metadata.is_dir() {
         if let Ok(target_metadata) = fs::symlink_metadata(target) {
-            if !target_metadata.is_dir() || target_metadata.file_type().is_symlink() {
+            if !target_metadata.is_dir() || is_link_metadata(&target_metadata) {
                 remove_path_if_exists(target)?;
             }
         }
@@ -2585,7 +2671,7 @@ fn recover_recreated_skill_path(skill_path: &Path, backup_path: &Path) -> Result
         return Ok(());
     };
 
-    if backup_metadata.file_type().is_symlink() {
+    if is_link_metadata(&backup_metadata) {
         return Err(format!(
             "Backup path must not be a symlink: {}",
             backup_path.to_string_lossy()
@@ -2596,7 +2682,7 @@ fn recover_recreated_skill_path(skill_path: &Path, backup_path: &Path) -> Result
         return Ok(());
     };
 
-    if skill_metadata.file_type().is_symlink() {
+    if is_link_metadata(&skill_metadata) {
         return Err(format!(
             "Unable to recover an unrecognized link: {}",
             skill_path.to_string_lossy()
@@ -3181,7 +3267,7 @@ fn commit_repo_changes(repo_path: &Path) -> Result<bool, String> {
 fn check_link_status(path: &str) -> (bool, Option<String>) {
     let path_obj = PathBuf::from(path);
     if let Ok(metadata) = fs::symlink_metadata(&path_obj) {
-        if metadata.file_type().is_symlink() {
+        if is_link_metadata(&metadata) {
             return (true, None);
         }
     }
@@ -4163,7 +4249,7 @@ fn open_path_in_file_manager(path: String) -> Result<(), String> {
         let metadata = fs::symlink_metadata(&target)
             .map_err(|error| format!("Failed to inspect {}: {}", target.display(), error))?;
 
-        if metadata.file_type().is_symlink() {
+        if is_link_metadata(&metadata) {
             let status = Command::new("open")
                 .args(["-R"])
                 .arg(&target)
@@ -4402,7 +4488,7 @@ fn delete_skill(skill_path: String) -> Result<(), String> {
     }
 
     let metadata = fs::symlink_metadata(&target).map_err(|e| e.to_string())?;
-    if metadata.file_type().is_symlink() {
+    if is_link_metadata(&metadata) {
         let result = fs::remove_file(&target)
             .or_else(|_| fs::remove_dir(&target))
             .map_err(|e| e.to_string());
@@ -4746,7 +4832,7 @@ fn unlink_app(app_id: String) -> Result<(), String> {
     let linked_target = if skill_dir.exists() {
         fs::symlink_metadata(&skill_dir)
             .ok()
-            .filter(|metadata| metadata.file_type().is_symlink())
+            .filter(is_link_metadata)
             .and_then(|_| resolve_link_target(&skill_dir))
     } else {
         None
@@ -4762,7 +4848,7 @@ fn unlink_app(app_id: String) -> Result<(), String> {
 
     if skill_dir.exists() {
         if let Ok(metadata) = fs::symlink_metadata(&skill_dir) {
-            if metadata.file_type().is_symlink() {
+            if is_link_metadata(&metadata) {
                 remove_path_if_exists(&skill_dir)?;
             }
         }

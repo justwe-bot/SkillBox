@@ -324,6 +324,13 @@ fn build_macos_known_apps(home: &Path) -> Vec<KnownApp> {
             ],
         ),
         known_app(
+            "deepseek-harness",
+            "DeepSeek Harness",
+            "🔷",
+            vec![home.join(".dsh/skills")],
+            vec![home.join(".dsh")],
+        ),
+        known_app(
             "openclaw",
             "Openclaw",
             "🦀",
@@ -533,6 +540,13 @@ fn build_windows_known_apps(home: &Path) -> Vec<KnownApp> {
             vec![home.join(".codex"), home.join(".codex/config.toml")],
         ),
         known_app(
+            "deepseek-harness",
+            "DeepSeek Harness",
+            "🔷",
+            vec![home.join(".dsh/skills")],
+            vec![home.join(".dsh")],
+        ),
+        known_app(
             "openclaw",
             "Openclaw",
             "🦀",
@@ -714,6 +728,13 @@ fn build_linux_known_apps(home: &Path) -> Vec<KnownApp> {
             "📦",
             vec![home.join(".codex/skills")],
             vec![home.join(".codex"), home.join(".codex/config.toml")],
+        ),
+        known_app(
+            "deepseek-harness",
+            "DeepSeek Harness",
+            "🔷",
+            vec![home.join(".dsh/skills")],
+            vec![home.join(".dsh")],
         ),
         known_app(
             "openclaw",
@@ -925,6 +946,21 @@ mod tests {
         assert_eq!(linux.name, "WorkBuddy");
         assert_eq!(linux.skill_paths, vec![home.join(".workbuddy/skills")]);
         assert!(linux.install_markers.contains(&home.join(".workbuddy")));
+    }
+
+    #[test]
+    fn known_apps_include_deepseek_harness_skill_path() {
+        let home = PathBuf::from("/Users/example");
+
+        for app in [
+            find_test_app(build_macos_known_apps(&home), "deepseek-harness"),
+            find_test_app(build_windows_known_apps(&home), "deepseek-harness"),
+            find_test_app(build_linux_known_apps(&home), "deepseek-harness"),
+        ] {
+            assert_eq!(app.name, "DeepSeek Harness");
+            assert_eq!(app.skill_paths, vec![home.join(".dsh/skills")]);
+            assert_eq!(app.install_markers, vec![home.join(".dsh")]);
+        }
     }
 
     #[test]

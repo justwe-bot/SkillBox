@@ -44,6 +44,7 @@ xattr -dr com.apple.quarantine /Applications/SkillBox.app
 | Cursor | `~/.cursor/rules` |
 | Windsurf | `~/.windsurf/rules` |
 | Codex | `~/.codex/skills` |
+| DeepSeek Harness | `~/.dsh/skills` |
 | GitHub Copilot | `~/.copilot/skills` |
 | opencode | `~/.config/opencode/skills` |
 | ZCode | `~/.zcode/skills` |

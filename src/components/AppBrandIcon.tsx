@@ -41,6 +41,7 @@ const BRAND_ICON_PATHS: Record<string, string> = {
   codex: '/brand-icons/unified/codex.png',
   copilot: '/brand-icons/unified/copilot.png',
   cursor: '/brand-icons/unified/cursor.png',
+  'deepseek-harness': '/brand-icons/deepseek-harness.svg',
   gemini: '/brand-icons/unified/gemini.png',
   grok: '/brand-icons/unified/grok.png',
   kiro: '/brand-icons/unified/kiro.png',

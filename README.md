@@ -21,6 +21,7 @@ xattr -dr com.apple.quarantine /Applications/SkillBox.app
 - 支持技能重命名、删除、打开所在目录
 - 支持为应用创建或取消软链接
 - 支持为每个应用单独启用或禁用同步目录中的技能
+- 支持启动 DeepSeek Harness Desktop；未安装 Desktop 时自动回退到 CLI Web 模式
 - 技能市场在未安装 `skills` / `npx` 时，也可自动切换到内置网络模式进行搜索、查看说明和安装
 - 提供 Git 仓库地址、用户名、分支配置，以及推送、拉取、同步操作
 - 支持浅色、深色和跟随系统主题
@@ -50,6 +51,8 @@ xattr -dr com.apple.quarantine /Applications/SkillBox.app
 | ZCode | `~/.zcode/skills` |
 | Grok Build | `~/.grok/skills` |
 | WorkBuddy | `~/.workbuddy/skills` |
+
+DeepSeek Harness CLI 和 Desktop 默认共享 `~/.dsh/skills`。点击应用卡片的运行按钮时，SkillBox 会优先重启已安装的 Desktop 应用；未发现 Desktop 时，会定位本机 `dsh` CLI、重启 `dsh --profile web --port 3080`，并由 DSH 打开带认证信息的 Web 页面。
 
 ## 软链接说明
 

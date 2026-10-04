@@ -487,9 +487,9 @@ export default function DashboardPage() {
   }
 
   useEffect(() => {
-    if (!cachedSnapshotRef.current) {
-      void refreshData()
-    }
+    // Render a cached snapshot immediately, then always refresh it in the
+    // background so newly supported or newly installed apps are discovered.
+    void refreshData()
 
     return () => {
       if (highlightTimerRef.current !== null) {

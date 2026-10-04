@@ -16,13 +16,14 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{BufReader, Cursor, Read};
+use std::net::{SocketAddr, TcpStream};
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::Manager;
 use tokio::fs as tokio_fs;
 use tokio::io::AsyncWriteExt;
@@ -328,7 +329,12 @@ fn build_macos_known_apps(home: &Path) -> Vec<KnownApp> {
             "DeepSeek Harness",
             "🔷",
             vec![home.join(".dsh/skills")],
-            vec![home.join(".dsh")],
+            vec![
+                PathBuf::from("/Applications/DeepSeek Harness.app"),
+                home.join("Applications/DeepSeek Harness.app"),
+                app_support.join("@deepseek-ai/dsh-desktop"),
+                home.join(".dsh"),
+            ],
         ),
         known_app(
             "openclaw",
@@ -530,6 +536,7 @@ fn build_macos_known_apps(home: &Path) -> Vec<KnownApp> {
 
 fn build_windows_known_apps(home: &Path) -> Vec<KnownApp> {
     let app_data = PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default());
+    let local_app_data = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default());
 
     vec![
         known_app(
@@ -544,7 +551,12 @@ fn build_windows_known_apps(home: &Path) -> Vec<KnownApp> {
             "DeepSeek Harness",
             "🔷",
             vec![home.join(".dsh/skills")],
-            vec![home.join(".dsh")],
+            vec![
+                local_app_data.join("Programs/DeepSeek Harness/DeepSeek Harness.exe"),
+                local_app_data.join("DeepSeek Harness/DeepSeek Harness.exe"),
+                app_data.join("@deepseek-ai/dsh-desktop"),
+                home.join(".dsh"),
+            ],
         ),
         known_app(
             "openclaw",
@@ -734,7 +746,14 @@ fn build_linux_known_apps(home: &Path) -> Vec<KnownApp> {
             "DeepSeek Harness",
             "🔷",
             vec![home.join(".dsh/skills")],
-            vec![home.join(".dsh")],
+            vec![
+                PathBuf::from("/opt/DeepSeek Harness/deepseek-harness"),
+                PathBuf::from("/usr/local/bin/deepseek-harness"),
+                PathBuf::from("/usr/bin/deepseek-harness"),
+                home.join(".local/bin/deepseek-harness"),
+                config_dir.join("@deepseek-ai/dsh-desktop"),
+                home.join(".dsh"),
+            ],
         ),
         known_app(
             "openclaw",
@@ -952,15 +971,45 @@ mod tests {
     fn known_apps_include_deepseek_harness_skill_path() {
         let home = PathBuf::from("/Users/example");
 
+        let macos = find_test_app(build_macos_known_apps(&home), "deepseek-harness");
+        assert_eq!(macos.name, "DeepSeek Harness");
+        assert_eq!(macos.skill_paths, vec![home.join(".dsh/skills")]);
+        assert!(macos
+            .install_markers
+            .contains(&PathBuf::from("/Applications/DeepSeek Harness.app")));
+        assert!(macos
+            .install_markers
+            .contains(&home.join("Applications/DeepSeek Harness.app")));
+        assert!(macos
+            .install_markers
+            .contains(&home.join("Library/Application Support/@deepseek-ai/dsh-desktop")));
+        assert!(macos.install_markers.contains(&home.join(".dsh")));
+
         for app in [
-            find_test_app(build_macos_known_apps(&home), "deepseek-harness"),
             find_test_app(build_windows_known_apps(&home), "deepseek-harness"),
             find_test_app(build_linux_known_apps(&home), "deepseek-harness"),
         ] {
             assert_eq!(app.name, "DeepSeek Harness");
             assert_eq!(app.skill_paths, vec![home.join(".dsh/skills")]);
-            assert_eq!(app.install_markers, vec![home.join(".dsh")]);
+            assert!(app.install_markers.contains(&home.join(".dsh")));
         }
+    }
+
+    #[test]
+    fn deepseek_web_process_detection_accepts_cli_forms_only() {
+        assert!(is_dsh_web_command(
+            "/Users/example/.nvm/versions/node/v22/bin/dsh --profile web --no-open"
+        ));
+        assert!(is_dsh_web_command(
+            "node /Users/example/bin/dsh web --no-open"
+        ));
+        assert!(is_dsh_web_command(
+            r"C:\Users\example\AppData\Roaming\npm\dsh.cmd --profile=web --port 3080"
+        ));
+        assert!(!is_dsh_web_command(
+            "/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness"
+        ));
+        assert!(!is_dsh_web_command("python -m http.server 3080"));
     }
 
     #[test]
@@ -4214,19 +4263,440 @@ fn resolve_launch_target(app: &KnownApp) -> Option<PathBuf> {
 }
 
 fn app_has_install_marker(app: &KnownApp) -> bool {
-    app.install_markers.iter().any(|value| value.exists()) || {
-        #[cfg(target_os = "macos")]
-        {
-            macos_bundle_candidates(app)
-                .into_iter()
-                .any(|path| path.exists())
-        }
+    app.install_markers.iter().any(|value| value.exists())
+        || (app.id == "deepseek-harness" && resolve_dsh_cli().is_some())
+        || {
+            #[cfg(target_os = "macos")]
+            {
+                macos_bundle_candidates(app)
+                    .into_iter()
+                    .any(|path| path.exists())
+            }
 
-        #[cfg(not(target_os = "macos"))]
-        {
-            false
+            #[cfg(not(target_os = "macos"))]
+            {
+                false
+            }
+        }
+}
+
+const DSH_WEB_PORT: u16 = 3080;
+fn is_dsh_web_command(command: &str) -> bool {
+    let normalized = command.to_ascii_lowercase().replace('\\', "/");
+    let has_dsh = normalized
+        .split_whitespace()
+        .any(|part| part == "dsh" || part.ends_with("/dsh") || part.ends_with("/dsh.cmd"));
+    let has_web_profile = normalized.contains("--profile web")
+        || normalized.contains("--profile=web")
+        || normalized.contains("dsh web");
+
+    has_dsh && has_web_profile
+}
+
+fn is_tcp_port_open(port: u16) -> bool {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn listener_pids(port: u16) -> Result<Vec<u32>, String> {
+    let output = Command::new("lsof")
+        .args(["-nP", &format!("-iTCP:{}", port), "-sTCP:LISTEN", "-t"])
+        .output()
+        .map_err(|error| format!("Failed to inspect port {}: {}", port, error))?;
+
+    if !output.status.success() && output.stdout.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect())
+}
+
+#[cfg(target_os = "windows")]
+fn listener_pids(port: u16) -> Result<Vec<u32>, String> {
+    let output = Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .output()
+        .map_err(|error| format!("Failed to inspect port {}: {}", port, error))?;
+
+    let port_marker = format!(":{}", port);
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| {
+            let upper = line.to_ascii_uppercase();
+            upper.contains(&port_marker) && upper.contains("LISTENING")
+        })
+        .filter_map(|line| line.split_whitespace().last())
+        .filter_map(|value| value.parse::<u32>().ok())
+        .collect())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn process_command_line(pid: u32) -> Result<String, String> {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .map_err(|error| format!("Failed to inspect process {}: {}", pid, error))?;
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn process_command_line(pid: u32) -> Result<String, String> {
+    let script = format!(
+        "(Get-CimInstance Win32_Process -Filter \"ProcessId = {}\").CommandLine",
+        pid
+    );
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+        .map_err(|error| format!("Failed to inspect process {}: {}", pid, error))?;
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn terminate_process(pid: u32, force: bool) -> Result<(), String> {
+    let signal = if force { "-KILL" } else { "-TERM" };
+    let status = Command::new("kill")
+        .args([signal, &pid.to_string()])
+        .status()
+        .map_err(|error| format!("Failed to stop process {}: {}", pid, error))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Failed to stop process {}", pid))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_process(pid: u32, force: bool) -> Result<(), String> {
+    let mut command = Command::new("taskkill");
+    command.args(["/PID", &pid.to_string(), "/T"]);
+    if force {
+        command.arg("/F");
+    }
+    let status = command
+        .status()
+        .map_err(|error| format!("Failed to stop process {}: {}", pid, error))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Failed to stop process {}", pid))
+    }
+}
+
+fn stop_dsh_web_listener() -> Result<(), String> {
+    if !is_tcp_port_open(DSH_WEB_PORT) {
+        return Ok(());
+    }
+
+    let pids = listener_pids(DSH_WEB_PORT)?;
+    if pids.is_empty() {
+        return Err(format!(
+            "Port {} is already in use and its process could not be identified",
+            DSH_WEB_PORT
+        ));
+    }
+
+    for pid in &pids {
+        let command = process_command_line(*pid)?;
+        if !is_dsh_web_command(&command) {
+            return Err(format!(
+                "Port {} is occupied by another application: {}",
+                DSH_WEB_PORT, command
+            ));
         }
     }
+
+    for pid in &pids {
+        terminate_process(*pid, false)?;
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < deadline {
+        if !is_tcp_port_open(DSH_WEB_PORT) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+
+    for pid in &pids {
+        let _ = terminate_process(*pid, true);
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if !is_tcp_port_open(DSH_WEB_PORT) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    Err(format!(
+        "DeepSeek Harness Web did not release port {}",
+        DSH_WEB_PORT
+    ))
+}
+
+fn add_dsh_cli_candidate(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if !candidate.as_os_str().is_empty() && !candidates.contains(&candidate) {
+        candidates.push(candidate);
+    }
+}
+
+fn resolve_dsh_cli() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(value) = std::env::var_os("DSH_BIN") {
+        add_dsh_cli_candidate(&mut candidates, PathBuf::from(value));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = Command::new("where").arg("dsh").output() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                add_dsh_cli_candidate(&mut candidates, PathBuf::from(line.trim()));
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
+        if let Ok(output) = Command::new(shell)
+            .args(["-lc", "command -v dsh"])
+            .stderr(Stdio::null())
+            .output()
+        {
+            if output.status.success() {
+                add_dsh_cli_candidate(
+                    &mut candidates,
+                    PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()),
+                );
+            }
+        }
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        #[cfg(target_os = "windows")]
+        {
+            add_dsh_cli_candidate(&mut candidates, home.join("AppData/Roaming/npm/dsh.cmd"));
+            add_dsh_cli_candidate(&mut candidates, home.join(".local/bin/dsh.exe"));
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            for candidate in [
+                home.join(".local/bin/dsh"),
+                home.join(".volta/bin/dsh"),
+                home.join(".npm-global/bin/dsh"),
+                home.join(".local/share/pnpm/dsh"),
+                home.join("Library/pnpm/dsh"),
+            ] {
+                add_dsh_cli_candidate(&mut candidates, candidate);
+            }
+
+            let nvm_versions = home.join(".nvm/versions/node");
+            if let Ok(entries) = fs::read_dir(nvm_versions) {
+                let mut version_dirs = entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .collect::<Vec<_>>();
+                version_dirs.sort();
+                version_dirs.reverse();
+                for version_dir in version_dirs {
+                    add_dsh_cli_candidate(&mut candidates, version_dir.join("bin/dsh"));
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    for candidate in [
+        PathBuf::from("/opt/homebrew/bin/dsh"),
+        PathBuf::from("/usr/local/bin/dsh"),
+        PathBuf::from("/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"),
+    ] {
+        add_dsh_cli_candidate(&mut candidates, candidate);
+    }
+
+    #[cfg(target_os = "linux")]
+    for candidate in [
+        PathBuf::from("/usr/local/bin/dsh"),
+        PathBuf::from("/usr/bin/dsh"),
+    ] {
+        add_dsh_cli_candidate(&mut candidates, candidate);
+    }
+
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn launch_dsh_web() -> Result<(), String> {
+    let dsh = resolve_dsh_cli().ok_or_else(|| {
+        "DeepSeek Harness CLI was not found. Install `dsh` or set DSH_BIN.".to_string()
+    })?;
+
+    stop_dsh_web_listener()?;
+
+    let mut command = Command::new(&dsh);
+    command
+        .args(["--profile", "web", "--port", &DSH_WEB_PORT.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    if let Some(parent) = dsh.parent() {
+        let mut paths = vec![parent.to_path_buf()];
+        if let Some(current_path) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&current_path));
+        }
+        if let Ok(path_value) = std::env::join_paths(paths) {
+            command.env("PATH", path_value);
+        }
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        command.current_dir(home);
+    }
+
+    let mut child = command.spawn().map_err(|error| {
+        format!(
+            "Failed to start DeepSeek Harness CLI at {}: {}",
+            dsh.display(),
+            error
+        )
+    })?;
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if is_tcp_port_open(DSH_WEB_PORT) {
+            // DSH opens its own authenticated browser URL. Opening the bare
+            // localhost address here would fail its browser-trust check.
+            return Ok(());
+        }
+
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("Failed to inspect DeepSeek Harness CLI: {}", error))?
+        {
+            return Err(format!(
+                "DeepSeek Harness CLI exited before port {} opened: {}",
+                DSH_WEB_PORT, status
+            ));
+        }
+
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    let _ = child.kill();
+    Err(format!(
+        "Timed out waiting for DeepSeek Harness Web on port {}",
+        DSH_WEB_PORT
+    ))
+}
+
+fn restart_deepseek_desktop(target: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("osascript")
+            .args(["-e", "tell application id \"com.deepseek.dsh\" to quit"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let running = Command::new("pgrep")
+                .args(["-x", "DeepSeek Harness"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if !running {
+                break;
+            }
+            thread::sleep(Duration::from_millis(150));
+        }
+
+        let still_running = Command::new("pgrep")
+            .args(["-x", "DeepSeek Harness"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if still_running {
+            let _ = Command::new("pkill")
+                .args(["-TERM", "-x", "DeepSeek Harness"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let process_name = target
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("DeepSeek Harness.exe");
+        let _ = Command::new("taskkill")
+            .args(["/IM", process_name, "/T"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        thread::sleep(Duration::from_millis(500));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(process_name) = target.file_name().and_then(|value| value.to_str()) {
+            let _ = Command::new("pkill")
+                .args(["-TERM", "-x", process_name])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        open_system_target(target)
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        Command::new(target)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| {
+                format!(
+                    "Failed to start DeepSeek Harness Desktop at {}: {}",
+                    target.display(),
+                    error
+                )
+            })
+    }
+}
+
+fn launch_deepseek_harness(app: &KnownApp) -> Result<(), String> {
+    if let Some(target) = resolve_launch_target(app) {
+        return restart_deepseek_desktop(&target);
+    }
+
+    launch_dsh_web()
 }
 
 fn open_system_target(target: &Path) -> Result<(), String> {
@@ -4296,6 +4766,10 @@ fn open_path_in_file_manager(path: String) -> Result<(), String> {
 #[tauri::command]
 fn launch_app(app_id: String) -> Result<(), String> {
     let app = find_known_app(&app_id).ok_or_else(|| format!("App {} not found", app_id))?;
+
+    if app.id == "deepseek-harness" {
+        return launch_deepseek_harness(&app);
+    }
 
     let target = resolve_launch_target(&app)
         .ok_or_else(|| format!("No launchable application bundle found for {}", app.name))?;

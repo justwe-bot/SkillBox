@@ -1379,6 +1379,13 @@ a {
   max-width: min(44vw, 560px);
 }
 
+.card-app__setup-hint {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 .card-app__details {
   margin-bottom: 8px;
 }

@@ -82,7 +82,7 @@ export function ApplicationCard({
               className="button button--icon-ghost card-app__action"
               type="button"
               onClick={() => onLaunchApp(app)}
-              disabled={busy || !app.isInstalled}
+              disabled={busy || (!app.isInstalled && !app.isWeb)}
               aria-label={t('dashboard.card.runApp', { name: app.name })}
               title={t('dashboard.card.runSoftware')}
             >
@@ -100,7 +100,9 @@ export function ApplicationCard({
             </button>
           </div>
           <div className="card-app__badges">
-            {app.isInstalled ? (
+            {app.isWeb ? (
+              <span className="badge badge--detected">{t('dashboard.card.webVersion')}</span>
+            ) : app.isInstalled ? (
               <span className="badge badge--detected">
                 <Check className="badge__icon" size={14} />
                 {t('dashboard.card.detected')}
@@ -131,7 +133,7 @@ export function ApplicationCard({
           className={`switch-pill ${app.isLinked ? 'switch-pill--on' : ''}`}
           type="button"
           onClick={() => onToggleLink(app)}
-          disabled={busy || !app.isInstalled}
+          disabled={busy || (!app.isInstalled && !app.isWeb)}
           aria-pressed={app.isLinked}
         >
           <span className={`switch-pill__label ${app.isLinked ? 'switch-pill__label--linked' : ''} ${busy ? 'switch-pill__label--busy' : ''}`}>
@@ -142,6 +144,10 @@ export function ApplicationCard({
           </span>
         </button>
       </div>
+
+      {app.id === 'gemini-app' && (app.isInstalled || app.isWeb) ? (
+        <p className="card-app__setup-hint">{t('dashboard.card.geminiAppSetup')}</p>
+      ) : null}
 
       {app.isCustom ? (
         <button className="button button--card button--full" type="button" onClick={() => onEditPath(app)} disabled={busy}>

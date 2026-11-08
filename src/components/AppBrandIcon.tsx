@@ -43,6 +43,7 @@ const BRAND_ICON_PATHS: Record<string, string> = {
   cursor: '/brand-icons/unified/cursor.png',
   'deepseek-harness': '/brand-icons/deepseek-harness.svg',
   gemini: '/brand-icons/unified/gemini.png',
+  'gemini-app': '/brand-icons/gemini-app.png',
   grok: '/brand-icons/unified/grok.png',
   kiro: '/brand-icons/unified/kiro.png',
   openclaw: '/brand-icons/unified/openclaw.png',

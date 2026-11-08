@@ -7,6 +7,7 @@ export interface BackendApp {
   enabled_skill_count: number
   is_linked: boolean
   is_installed: boolean
+  is_web?: boolean
   is_custom?: boolean
   backup_path?: string | null
   custom_path?: string | null
@@ -22,6 +23,7 @@ export interface AppRecord {
   enabledSkillCount: number
   isLinked: boolean
   isInstalled: boolean
+  isWeb: boolean
   isCustom: boolean
   backupPath?: string | null
   customPath?: string | null

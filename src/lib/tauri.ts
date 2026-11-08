@@ -33,6 +33,7 @@ function mapApp(app: BackendApp): AppRecord {
     enabledSkillCount: app.enabled_skill_count,
     isLinked: app.is_linked,
     isInstalled: app.is_installed,
+    isWeb: app.is_web ?? false,
     isCustom: app.is_custom ?? false,
     backupPath: app.backup_path,
     customPath: app.custom_path,

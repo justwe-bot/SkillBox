@@ -380,7 +380,7 @@ export default function DashboardPage() {
   }
 
   async function scanSkillsInBackground(nextApps: AppRecord[], sessionId: number, showToast: boolean) {
-    const readableApps = nextApps.filter((app) => app.isInstalled || app.isLinked)
+    const readableApps = nextApps.filter((app) => app.isInstalled || app.isWeb || app.isLinked)
 
     scannedSkillListsRef.current = new Map()
     setApps(nextApps.map((app) => ({ ...app, skillCount: 0 })))
@@ -601,8 +601,10 @@ export default function DashboardPage() {
     return apps
       .map((app, index) => ({ app, index }))
       .sort((left, right) => {
-        if (left.app.isInstalled !== right.app.isInstalled) {
-          return left.app.isInstalled ? -1 : 1
+        const leftAvailable = left.app.isInstalled || left.app.isWeb
+        const rightAvailable = right.app.isInstalled || right.app.isWeb
+        if (leftAvailable !== rightAvailable) {
+          return leftAvailable ? -1 : 1
         }
 
         if (left.app.isLinked !== right.app.isLinked) {

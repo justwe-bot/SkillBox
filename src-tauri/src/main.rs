@@ -40,6 +40,7 @@ struct SkillApp {
     enabled_skill_count: usize,
     is_linked: bool,
     is_installed: bool,
+    is_web: bool,
     is_custom: bool,
     backup_path: Option<String>,
     custom_path: Option<String>,
@@ -515,6 +516,16 @@ fn build_macos_known_apps(home: &Path) -> Vec<KnownApp> {
             ],
         ),
         known_app(
+            "gemini-app",
+            "Gemini App",
+            "✨",
+            vec![home.join(".skillbox/gemini-app/skills")],
+            vec![
+                PathBuf::from("/Applications/Gemini.app"),
+                home.join("Applications/Gemini.app"),
+            ],
+        ),
+        known_app(
             "roocode",
             "RooCode",
             "🦘",
@@ -709,6 +720,13 @@ fn build_windows_known_apps(home: &Path) -> Vec<KnownApp> {
                 app_data.join("Claude/claude_desktop_skills"),
             ],
             vec![app_data.join("Claude"), home.join(".claude")],
+        ),
+        known_app(
+            "gemini-app",
+            "Gemini App",
+            "✨",
+            vec![home.join(".skillbox/gemini-app/skills")],
+            vec![],
         ),
         known_app(
             "roocode",
@@ -939,6 +957,23 @@ mod tests {
         apps.into_iter()
             .find(|app| app.id == app_id)
             .unwrap_or_else(|| panic!("expected known app `{}` to be registered", app_id))
+    }
+
+    #[test]
+    fn gemini_app_is_distinct_from_gemini_cli() {
+        let home = PathBuf::from("/Users/example");
+        let apps = build_macos_known_apps(&home);
+        let desktop = find_test_app(apps.clone(), "gemini-app");
+        let cli = find_test_app(apps, "gemini");
+
+        assert_eq!(desktop.skill_paths, vec![home.join(".skillbox/gemini-app/skills")]);
+        assert!(desktop.install_markers.contains(&PathBuf::from("/Applications/Gemini.app")));
+        assert!(desktop.install_markers.contains(&home.join("Applications/Gemini.app")));
+        assert!(!cli.skill_paths.contains(&desktop.skill_paths[0]));
+        let windows = find_test_app(build_windows_known_apps(&home), "gemini-app");
+        assert_eq!(windows.skill_paths, vec![home.join(".skillbox/gemini-app/skills")]);
+        assert!(windows.install_markers.is_empty());
+        assert!(!build_linux_known_apps(&home).iter().any(|app| app.id == "gemini-app"));
     }
 
     #[test]
@@ -4767,6 +4802,11 @@ fn open_path_in_file_manager(path: String) -> Result<(), String> {
 fn launch_app(app_id: String) -> Result<(), String> {
     let app = find_known_app(&app_id).ok_or_else(|| format!("App {} not found", app_id))?;
 
+    #[cfg(target_os = "windows")]
+    if app.id == "gemini-app" {
+        return open_system_target(Path::new("https://gemini.google.com/"));
+    }
+
     if app.id == "deepseek-harness" {
         return launch_deepseek_harness(&app);
     }
@@ -4788,13 +4828,14 @@ fn scan_apps() -> Result<(Vec<SkillApp>, String), String> {
         let path = resolve_skill_path(&app.id, &config)?;
         let (is_linked, backup_path) = check_link_status(&path);
         let link_mode = detect_link_mode(Path::new(&path), &app.id, &config);
-        let is_installed = custom_path
+        let is_web = cfg!(target_os = "windows") && app.id == "gemini-app";
+        let is_installed = !is_web && (custom_path
             .as_ref()
             .map(|value| PathBuf::from(value).exists())
             .unwrap_or(false)
             || app.skill_paths.iter().any(|value| value.exists())
             || app_has_install_marker(&app)
-            || backup_path.is_some();
+            || backup_path.is_some());
         let enabled_skill_count = get_enabled_skill_count(&app.id, link_mode.as_deref(), &config);
 
         apps.push(SkillApp {
@@ -4806,6 +4847,7 @@ fn scan_apps() -> Result<(Vec<SkillApp>, String), String> {
             enabled_skill_count,
             is_linked,
             is_installed,
+            is_web,
             is_custom: false,
             backup_path,
             custom_path,
@@ -4829,6 +4871,7 @@ fn scan_apps() -> Result<(Vec<SkillApp>, String), String> {
                 enabled_skill_count,
                 is_linked,
                 is_installed,
+                is_web: false,
                 is_custom: true,
                 backup_path,
                 custom_path: Some(custom_path.clone()),

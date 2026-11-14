@@ -300,6 +300,41 @@ fn known_app(
     }
 }
 
+fn build_antigravity_app(home: &Path, mut platform_markers: Vec<PathBuf>) -> KnownApp {
+    platform_markers.extend([
+        home.join(".gemini/antigravity"),
+        home.join(".gemini/antigravity-ide"),
+        home.join(".gemini/antigravity-cli"),
+        home.join(".gemini/config"),
+    ]);
+
+    known_app(
+        "antigravity",
+        "Antigravity",
+        "🚀",
+        vec![home.join(".gemini/config/skills")],
+        platform_markers,
+    )
+}
+
+fn build_gemini_cli_app(home: &Path) -> KnownApp {
+    // Avoid using ~/.gemini alone as a marker because Antigravity also stores state under ~/.gemini.
+    known_app(
+        "gemini",
+        "Gemini CLI",
+        "✨",
+        vec![
+            home.join(".gemini/commands"),
+            home.join(".gemini/GEMINI.md"),
+        ],
+        vec![
+            home.join(".gemini/settings.json"),
+            home.join(".gemini/oauth_creds.json"),
+            home.join(".gemini/google_accounts.json"),
+        ],
+    )
+}
+
 fn build_known_apps() -> Vec<KnownApp> {
     let home = dirs::home_dir().unwrap_or_default();
 
@@ -532,16 +567,17 @@ fn build_macos_known_apps(home: &Path) -> Vec<KnownApp> {
             vec![home.join(".roo/skills")],
             vec![home.join(".roo")],
         ),
-        known_app(
-            "gemini",
-            "Gemini CLI",
-            "✨",
+        build_antigravity_app(
+            home,
             vec![
-                home.join(".gemini/commands"),
-                home.join(".gemini/GEMINI.md"),
+                PathBuf::from("/Applications/Antigravity.app"),
+                home.join("Applications/Antigravity.app"),
+                PathBuf::from("/Applications/Antigravity IDE.app"),
+                home.join("Applications/Antigravity IDE.app"),
+                app_support.join("Antigravity"),
             ],
-            vec![home.join(".gemini"), home.join(".gemini/settings.json")],
         ),
+        build_gemini_cli_app(home),
     ]
 }
 
@@ -735,16 +771,16 @@ fn build_windows_known_apps(home: &Path) -> Vec<KnownApp> {
             vec![home.join(".roo/skills")],
             vec![home.join(".roo")],
         ),
-        known_app(
-            "gemini",
-            "Gemini CLI",
-            "✨",
+        build_antigravity_app(
+            home,
             vec![
-                home.join(".gemini/commands"),
-                home.join(".gemini/GEMINI.md"),
+                local_app_data.join("Programs/Antigravity/Antigravity.exe"),
+                local_app_data.join("Programs/antigravity/Antigravity.exe"),
+                local_app_data.join("Antigravity/Antigravity.exe"),
+                app_data.join("Antigravity"),
             ],
-            vec![home.join(".gemini"), home.join(".gemini/settings.json")],
         ),
+        build_gemini_cli_app(home),
     ]
 }
 
@@ -932,16 +968,16 @@ fn build_linux_known_apps(home: &Path) -> Vec<KnownApp> {
             vec![home.join(".roo/skills")],
             vec![home.join(".roo")],
         ),
-        known_app(
-            "gemini",
-            "Gemini CLI",
-            "✨",
+        build_antigravity_app(
+            home,
             vec![
-                home.join(".gemini/commands"),
-                home.join(".gemini/GEMINI.md"),
+                PathBuf::from("/usr/bin/antigravity"),
+                PathBuf::from("/usr/local/bin/antigravity"),
+                home.join(".local/bin/antigravity"),
+                config_dir.join("Antigravity"),
             ],
-            vec![home.join(".gemini"), home.join(".gemini/settings.json")],
         ),
+        build_gemini_cli_app(home),
     ]
 }
 
@@ -974,6 +1010,108 @@ mod tests {
         assert_eq!(windows.skill_paths, vec![home.join(".skillbox/gemini-app/skills")]);
         assert!(windows.install_markers.is_empty());
         assert!(!build_linux_known_apps(&home).iter().any(|app| app.id == "gemini-app"));
+    }
+
+    #[test]
+    fn known_apps_include_antigravity_and_safe_gemini_cli_markers() {
+        let home = PathBuf::from("/Users/example");
+        let expected_skill_path = vec![home.join(".gemini/config/skills")];
+        let shared_antigravity_markers = [
+            home.join(".gemini/antigravity"),
+            home.join(".gemini/antigravity-ide"),
+            home.join(".gemini/antigravity-cli"),
+            home.join(".gemini/config"),
+        ];
+
+        let macos = find_test_app(build_macos_known_apps(&home), "antigravity");
+        assert_eq!(macos.name, "Antigravity");
+        assert_eq!(macos.skill_paths, expected_skill_path);
+        assert!(macos
+            .install_markers
+            .contains(&PathBuf::from("/Applications/Antigravity.app")));
+        assert!(macos
+            .install_markers
+            .contains(&PathBuf::from("/Applications/Antigravity IDE.app")));
+        assert!(macos
+            .install_markers
+            .contains(&home.join("Library/Application Support/Antigravity")));
+        for marker in &shared_antigravity_markers {
+            assert!(macos.install_markers.contains(marker));
+        }
+
+        let windows_app_data = PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default());
+        let windows_local_app_data =
+            PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default());
+        let windows = find_test_app(build_windows_known_apps(&home), "antigravity");
+        assert_eq!(windows.name, "Antigravity");
+        assert_eq!(windows.skill_paths, expected_skill_path);
+        assert!(windows
+            .install_markers
+            .contains(&windows_local_app_data.join("Programs/Antigravity/Antigravity.exe")));
+        assert!(windows
+            .install_markers
+            .contains(&windows_app_data.join("Antigravity")));
+        for marker in &shared_antigravity_markers {
+            assert!(windows.install_markers.contains(marker));
+        }
+
+        let linux = find_test_app(build_linux_known_apps(&home), "antigravity");
+        assert_eq!(linux.name, "Antigravity");
+        assert_eq!(linux.skill_paths, expected_skill_path);
+        assert!(linux
+            .install_markers
+            .contains(&PathBuf::from("/usr/bin/antigravity")));
+        assert!(linux
+            .install_markers
+            .contains(&home.join(".local/bin/antigravity")));
+        assert!(linux
+            .install_markers
+            .contains(&home.join(".config/Antigravity")));
+        for marker in &shared_antigravity_markers {
+            assert!(linux.install_markers.contains(marker));
+        }
+
+        for apps in [
+            build_macos_known_apps(&home),
+            build_windows_known_apps(&home),
+            build_linux_known_apps(&home),
+        ] {
+            let gemini_cli = find_test_app(apps, "gemini");
+            assert!(!gemini_cli.install_markers.contains(&home.join(".gemini")));
+            assert!(gemini_cli
+                .install_markers
+                .contains(&home.join(".gemini/settings.json")));
+            assert!(gemini_cli
+                .install_markers
+                .contains(&home.join(".gemini/oauth_creds.json")));
+            assert!(gemini_cli
+                .install_markers
+                .contains(&home.join(".gemini/google_accounts.json")));
+        }
+    }
+
+    #[test]
+    fn find_executable_in_dirs_matches_files_only() {
+        let root = create_recovery_test_dir("find-exec");
+        let first_dir = root.join("first");
+        let second_dir = root.join("second");
+        fs::create_dir_all(first_dir.join("agy")).unwrap();
+        fs::create_dir_all(&second_dir).unwrap();
+
+        let search_dirs = vec![first_dir.clone(), second_dir.clone()];
+        assert_eq!(
+            find_executable_in_dirs(&search_dirs, &["agy", "antigravity"]),
+            None
+        );
+
+        let expected = second_dir.join("antigravity");
+        fs::write(&expected, "#!/bin/sh\n").unwrap();
+        assert_eq!(
+            find_executable_in_dirs(&search_dirs, &["agy", "antigravity"]),
+            Some(expected)
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -4297,9 +4435,75 @@ fn resolve_launch_target(app: &KnownApp) -> Option<PathBuf> {
     None
 }
 
+fn find_executable_in_dirs(dirs: &[PathBuf], binary_names: &[&str]) -> Option<PathBuf> {
+    let extensions: &[&str] = if cfg!(target_os = "windows") {
+        &["", ".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
+
+    for dir in dirs {
+        for name in binary_names {
+            for ext in extensions {
+                let candidate = dir.join(format!("{name}{ext}"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Checks `PATH` and common CLI install directories without spawning a subshell.
+fn has_cli_on_path(binary_names: &[&str]) -> bool {
+    let mut dirs = std::env::var_os("PATH")
+        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    #[cfg(target_os = "windows")]
+    if let Some(app_data) = std::env::var_os("APPDATA") {
+        dirs.push(PathBuf::from(app_data).join("npm"));
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        #[cfg(target_os = "windows")]
+        dirs.extend([home.join("AppData/Roaming/npm"), home.join(".local/bin")]);
+
+        #[cfg(not(target_os = "windows"))]
+        dirs.extend([
+            home.join(".local/bin"),
+            home.join(".npm-global/bin"),
+            home.join(".volta/bin"),
+            home.join(".local/share/pnpm"),
+            home.join("Library/pnpm"),
+        ]);
+    }
+
+    #[cfg(target_os = "macos")]
+    dirs.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ]);
+
+    #[cfg(target_os = "linux")]
+    dirs.extend([
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/bin"),
+    ]);
+
+    find_executable_in_dirs(&dirs, binary_names).is_some()
+}
+
 fn app_has_install_marker(app: &KnownApp) -> bool {
     app.install_markers.iter().any(|value| value.exists())
-        || (app.id == "deepseek-harness" && resolve_dsh_cli().is_some())
+        || match app.id.as_str() {
+            "deepseek-harness" => resolve_dsh_cli().is_some(),
+            "antigravity" => has_cli_on_path(&["agy", "antigravity"]),
+            "gemini" => has_cli_on_path(&["gemini"]),
+            _ => false,
+        }
         || {
             #[cfg(target_os = "macos")]
             {

@@ -45,6 +45,7 @@ xattr -dr com.apple.quarantine /Applications/SkillBox.app
 | Cursor | `~/.cursor/rules` |
 | Windsurf | `~/.windsurf/rules` |
 | Codex | `~/.codex/skills` |
+| Antigravity | `~/.gemini/config/skills` |
 | Gemini App（macOS / Windows 网页版） | `~/.skillbox/gemini-app/skills`（用户目录下的 SkillBox 专用目录） |
 | DeepSeek Harness | `~/.dsh/skills` |
 | GitHub Copilot | `~/.copilot/skills` |
@@ -54,6 +55,8 @@ xattr -dr com.apple.quarantine /Applications/SkillBox.app
 | WorkBuddy | `~/.workbuddy/skills` |
 
 DeepSeek Harness CLI 和 Desktop 默认共享 `~/.dsh/skills`。点击应用卡片的运行按钮时，SkillBox 会优先重启已安装的 Desktop 应用；未发现 Desktop 时，会定位本机 `dsh` CLI、重启 `dsh --profile web --port 3080`，并由 DSH 打开带认证信息的 Web 页面。
+
+Antigravity（包含 Antigravity 2.0、Antigravity IDE 与 `agy` CLI）统一读取 `~/.gemini/config/skills` 下的全局技能目录，与 Gemini CLI（`~/.gemini/commands`）和 Gemini App 相互独立。
 
 Gemini App 与 Gemini CLI 是独立应用。Windows 的 Gemini App 卡片作为网页版入口，运行按钮打开 Gemini 网站，不代表检测到桌面程序。Gemini App 的目录由 SkillBox 管理，不是 Gemini 的默认目录；Windows 上默认位于 `%USERPROFILE%\.skillbox\gemini-app\skills`。创建链接后，可在 Gemini 的 **技能 → 创建 → 上传 skill** 中选择技能文件或文件夹。某些版本可能提供 **Skills Folders → Add Folder**，可尝试添加卡片显示的目录；macOS 选择文件夹时可按 `⌘⇧G` 输入路径。实际可用功能取决于 Gemini 的版本和账号，目录中的链接是否被持续读取尚未验证，上传也不等于自动同步。SkillBox 的“已链接”仅表示本地链接已建立。修改目录时应先取消链接，再修改并重新链接。
 

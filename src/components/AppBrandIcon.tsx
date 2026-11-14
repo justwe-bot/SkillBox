@@ -35,6 +35,7 @@ function MonogramIcon({ appName }: { appName: string }) {
 }
 
 const BRAND_ICON_PATHS: Record<string, string> = {
+  antigravity: '/brand-icons/antigravity.png',
   claude: '/brand-icons/unified/claude.png',
   cline: '/brand-icons/unified/cline.png',
   codebuddy: '/brand-icons/unified/codebuddy.png',
